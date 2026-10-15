@@ -7,6 +7,9 @@ load_dotenv()
 client = OpenAI(api_key=os.environ["LLM_API_KEY"], base_url=os.environ["LLM_BASE_URL"])
 MODEL = os.environ["LLM_MODEL"]
 
+print("LLM_BASE_URL:", os.environ["LLM_BASE_URL"])
+print("LLM_MODEL:", MODEL)
+
 TOOLS = [{"type": "function", "function": {
     "name": "remember_fact",
     "description": "Save or update a fact about the customer (e.g. key='plan', value='Basic'). "

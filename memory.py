@@ -4,6 +4,7 @@ from falkordb import FalkorDB
 
 load_dotenv()
 db = FalkorDB(host=os.environ["FALKOR_HOST"],
+              username=os.environ["FALKOR_USERNAME"],
               port=int(os.environ["FALKOR_PORT"]),
               password=os.environ["FALKOR_PASSWORD"])
 
@@ -48,3 +49,9 @@ def seed():
         remember_fact("tenant_acme", "maya", "name", "Maya")
         remember_fact("tenant_acme", "maya", "plan", "Pro")
     TRACE.clear()
+
+def fact_history(tenant, cust):
+    r = run(tenant, """MATCH (:Customer {id:$cust})-[:HAS_FACT]->(f:Fact)
+                       RETURN f.key, f.value, f.since, f.until ORDER BY f.since""",
+            {"cust": cust})
+    return [{"key": k, "value": v, "since": s, "until": u} for k, v, s, u in r.result_set]
