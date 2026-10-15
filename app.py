@@ -8,7 +8,7 @@ histories = {}
 
 @app.get("/")
 def index():
-    return send_from_directory(".", "index.html")
+    return send_from_directory(".\web", "index.html")
 
 @app.get("/state")
 def state():
