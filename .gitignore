@@ -30,3 +30,8 @@ dist/
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Logs and temporary files
+*.log
+temp
+temp/temp.py
