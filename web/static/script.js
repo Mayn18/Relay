@@ -40,3 +40,5 @@ async function send() {
   if (d.error) { add("bot", "Error: " + d.error); return; }
   add("bot", d.reply); showTrace(d.trace); showFacts(d.facts);
 }
+
+switchTenant();
