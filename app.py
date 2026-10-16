@@ -1,14 +1,22 @@
 from flask import Flask, request, jsonify, send_from_directory
 import memory as m
 import agents
+import os
 
-app = Flask(__name__)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+WEB_DIR = os.path.join(BASE_DIR, "web")
+
+app = Flask(
+     __name__,
+    static_folder=os.path.join(WEB_DIR, "static"),
+    static_url_path="/static"
+)
 TENANTS = {"tenant_acme": "maya", "tenant_bank": "raj"}   # tenant -> demo customer
 histories = {}
 
 @app.get("/")
 def index():
-    return send_from_directory(".\web", "index.html")
+    return send_from_directory(WEB_DIR, "index.html")
 
 @app.get("/state")
 def state():
