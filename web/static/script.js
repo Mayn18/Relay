@@ -31,6 +31,8 @@ async function switchTenant() {
   const d = await r.json();
   showFacts(d.facts);
   showCases(d.cases);
+  if (cy) cy.elements().remove();
+  await refreshGraph();
 }
 
 async function send() {
@@ -49,6 +51,7 @@ async function send() {
   showTrace(d.trace);
   showFacts(d.facts);
   showCases(d.cases);
+  await refreshGraph();
 }
 
 function showCases(cases) {
@@ -59,6 +62,47 @@ function showCases(cases) {
     [`${c.topic} (${c.status})`, c.step, c.agent, c.reason].forEach(x => r.insertCell().textContent = x);
   });
   $("cases").replaceChildren(t);
+}
+
+let cy = null;
+const COLORS = {Customer: "#fecaca", Fact: "#bfdbfe", Case: "#fde68a", Agent: "#ddd6fe"};
+
+async function refreshGraph() {
+  const r = await fetch("/graph?tenant=" + $("tenant").value);
+  const d = await r.json();
+  if (d.error) return;
+  if (!cy) {
+    cy = cytoscape({
+      container: $("graph"),
+      style: [
+        {selector: "node", style: {
+          "background-color": "data(color)", "label": "data(label)", "font-size": "10px",
+          "text-valign": "center", "text-wrap": "wrap", "text-max-width": "70px",
+          "shape": "round-rectangle", "width": "label", "height": "label",
+          "padding": "8px", "opacity": "data(opacity)"}},
+        {selector: "edge", style: {
+          "curve-style": "bezier", "target-arrow-shape": "triangle", "label": "data(label)",
+          "font-size": "8px", "line-color": "#999", "target-arrow-color": "#999", "width": 1.5}}
+      ]
+    });
+  }
+  const keep = new Set(), added = [];
+  d.nodes.forEach(n => {
+    const id = "n" + n.id; keep.add(id);
+    const data = {id, label: n.label,
+      color: n.resolved ? "#bbf7d0" : n.closed ? "#e5e7eb" : (COLORS[n.kind] || "#eee"),
+      opacity: n.closed ? 0.5 : 1};
+    const ex = cy.getElementById(id);
+    if (ex.nonempty()) ex.data(data); else added.push({data});
+  });
+  d.edges.forEach(e => {
+    const id = "e" + e.id; keep.add(id);
+    if (cy.getElementById(id).empty())
+      added.push({data: {id, source: "n" + e.source, target: "n" + e.target, label: e.type}});
+  });
+  cy.elements().filter(el => !keep.has(el.id())).remove();
+  if (added.length) cy.add(added);
+  cy.layout({name: "cose", animate: true, randomize: false, fit: true, padding: 20}).run();
 }
 
 switchTenant();

@@ -13,7 +13,7 @@ body {
 
 .wrap {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1.2fr;
     gap: 16px;
     padding: 16px;
     height: calc(100vh - 80px);
@@ -32,11 +32,13 @@ body {
     flex-direction: column;
     gap: 16px;
     overflow: hidden;
+    min-height: 0;
 }
 
 #log {
     flex: 1;
     overflow: auto;
+    min-height: 0;
 }
 
 .msg {
