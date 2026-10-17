@@ -102,7 +102,7 @@ def graph():
         elif kind == "Case":
             label = f"{p.get('topic')} ({'resolved' if resolved else 'open'})"
         else:
-            label = p.get("name", kind)
+            label = p.get("name") or p.get("title") or kind
         visible.add(nid)
         nodes.append(
             {

@@ -89,7 +89,7 @@ def seed():
             (
                 "lena",
                 "Duplicate payment after a card update",
-                "Duplicate payment refunded within 3 business days",
+                "Duplicate payment credited on the next invoice",
             ),
         ]:
             remember_fact("tenant_acme", cust, "plan", "Basic")
@@ -107,8 +107,52 @@ def seed():
                 },
                 write=True,
             )
+    seed_knowledge()
     TRACE.clear()
 
+ARTICLES = [  # (id, topic, title, text, plans it applies to)
+    ("dup_free", "billing", "Billing on the Free plan",
+     "The Free plan has no charges. Any charge must be reported as unauthorized and escalated to a human.",
+     ["Free"]),
+    ("dup_basic", "billing", "Duplicate charges (Basic)",
+     "On Basic, duplicate charges are refunded as account credit on the next invoice.", ["Basic"]),
+    ("dup_pro", "billing", "Duplicate charges (Pro)",
+     "On Pro, duplicate charges are refunded to the original payment method within 3 business days.",
+     ["Pro"]),
+    ("dup_ent", "billing", "Duplicate charges (Enterprise)",
+     "On Enterprise, duplicate charges go to the account manager, with a refund within 1 business day.",
+     ["Enterprise"]),
+    ("chg_up", "plan_change", "Upgrades",
+     "Upgrades take effect immediately and are prorated.", ["Free", "Basic", "Pro", "Enterprise"]),
+    ("chg_down", "plan_change", "Downgrades",
+     "Downgrades take effect at the next billing date.", ["Free", "Basic", "Pro", "Enterprise"]),
+]
+
+
+def seed_knowledge(tenant="tenant_acme"):
+    """Policy articles as a small knowledge graph:
+    (Article)-[:ABOUT]->(Topic) and (Article)-[:APPLIES_TO]->(Plan). Safe to re-run (MERGE)."""
+    for aid, topic, title, text, plans in ARTICLES:
+        run(tenant, """MERGE (t:Topic {name:$topic})
+                       MERGE (a:Article {id:$aid}) SET a.title = $title, a.text = $text
+                       MERGE (a)-[:ABOUT]->(t)""",
+            {"aid": aid, "topic": topic, "title": title, "text": text}, write=True)
+        for plan in plans:
+            run(tenant, """MATCH (a:Article {id:$aid})
+                           MERGE (p:Plan {name:$plan})
+                           MERGE (a)-[:APPLIES_TO]->(p)""",
+                {"aid": aid, "plan": plan}, write=True)
+
+
+def policies_for(tenant, cust, topic=None):
+    """GraphRAG-lite: customer -> CURRENT plan fact -> Plan <- Article -> Topic."""
+    r = run(tenant, """MATCH (:Customer {id:$cust})-[:HAS_FACT]->(f:Fact {key:'plan'})
+                       WHERE f.until IS NULL
+                       MATCH (p:Plan {name:f.value})<-[:APPLIES_TO]-(a:Article)-[:ABOUT]->(t:Topic)
+                       WHERE $topic IS NULL OR t.name = $topic
+                       RETURN a.id, a.title, a.text""",
+            {"cust": cust, "topic": topic})
+    return [{"id": i, "title": t, "text": x} for i, t, x in r.result_set]
 
 def reset():
     """Wipe both graphs and reseed. Handy before recording the demo."""

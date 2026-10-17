@@ -123,19 +123,27 @@ def run_agent(system, tools, tenant, cust, history, user_msg):
 def billing_turn(tenant, cust, case, history, user_msg):
     profile = m.recall_profile(tenant, cust)
     similar = m.similar_cases(tenant, cust, case["topic"])
+    policies = m.policies_for(tenant, cust, case["topic"])
     system = (
         "You are the Billing agent of a support desk. Be brief and friendly.\n"
         f"Customer facts (from the graph): {json.dumps(profile)}\n"
         f"Open case handed to you by the Concierge: {json.dumps(case)}\n"
         f"Resolved cases of OTHER customers on the same plan (from the graph): {json.dumps(similar)}\n"
-        "Do not ask the customer to repeat what is in the case. If a similar case has a fix "
-        "that fits, tell the customer you are arranging the same fix, then call resolve_case. "
-        "Never promise anything that is not in the similar cases."
+        f"Company policy for this customer's current plan (from the graph): {json.dumps(policies)}\n"
+        "Base every promise on the policy or on the similar cases. If one covers the issue, tell the "
+        "customer exactly what will happen, then call resolve_case. If neither covers it, say you are "
+        "escalating to a human and do NOT call resolve_case or promise anything. "
+        "Do not ask the customer to repeat what is in the case."
     )
     reply, _ = run_agent(system, [REMEMBER, RESOLVE], tenant, cust, history, user_msg)
     still_open = m.active_case(tenant, cust)
     if still_open and similar:  # safety net: close with a fix the graph already proves
-        m.resolve_case(tenant, cust, still_open["id"], similar[0]["fix"])
+        m.resolve_case(
+            tenant,
+            cust,
+            still_open["id"],
+            similar[0]["fix"] if similar else policies[0]["text"],
+        )
     return reply
 
 
@@ -153,6 +161,8 @@ def chat(tenant, cust, user_msg, history):
             "You are the Concierge agent of a support desk. Be brief and friendly.\n"
             f"Known facts about this customer (from the graph): {json.dumps(profile)}\n"
             f"Recent conversation (from the graph): {json.dumps(events)}\n"
+            f"Company policy for this customer's plan (from the graph): {json.dumps(m.policies_for(tenant, cust))}\n"
+            "Answer policy questions only from these policies; if not covered, say you will check with the team.\n"
             "Use these facts instead of asking again. If the customer states or changes a "
             "fact, call remember_fact. For anything about charges, refunds, invoices or "
             "payments, call handoff_to_billing; do not try to solve billing yourself."
