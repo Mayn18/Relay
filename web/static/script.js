@@ -105,4 +105,21 @@ async function refreshGraph() {
   cy.layout({name: "cose", animate: true, randomize: false, fit: true, padding: 20}).run();
 }
 
+async function resetDemo() {
+  try {
+    const response = await fetch("/reset", { method: "POST" });
+
+    if (!response.ok) {
+      alert("Reset failed. Please check the server.");
+      return;
+    }
+
+    $("box").value = "";
+    await switchTenant();
+  } catch (err) {
+    console.error("Reset failed:", err);
+    alert("Could not reset the demo. Check that the server is running.");
+  }
+}
+
 switchTenant();

@@ -53,6 +53,12 @@ def chat():
     m.TRACE.clear()
     return jsonify(reply=reply, agent=agent, trace=trace, facts=facts, cases=cases)
 
+@app.post("/reset")
+def reset():
+    m.reset()
+    histories.clear()
+    return jsonify(ok=True)
+
 @app.get("/graph")
 def graph():
     tenant = request.args.get("tenant", "")
