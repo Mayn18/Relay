@@ -146,11 +146,20 @@ def billing_turn(tenant, cust, case, history, user_msg):
         )
     return reply
 
+def history_from_graph(events):
+    """Rebuild the chat history from Event nodes, so no state lives in Python."""
+    return [
+        {"role": "user" if who == "customer" else "assistant", "content": text}
+        for who, text in events
+        if who != "guardrail" and text
+    ]
 
-def chat(tenant, cust, user_msg, history):
+def chat(tenant, cust, user_msg):
+    
     """Returns (reply, agent_name). Memory is read from the graph on EVERY turn."""
     profile = m.recall_profile(tenant, cust)
     events = m.recent_events(tenant, cust)
+    history = history_from_graph(events)
     m.log_event(tenant, cust, "customer", user_msg)
 
     case = m.active_case(tenant, cust)  # routing is a graph query
@@ -200,9 +209,9 @@ if __name__ == "__main__":
     print("Chatting as maya @ tenant_acme. Ctrl+C to quit.")
     while True:
         text = input("You: ")
-        reply, agent = chat("tenant_acme", "maya", text, history)
-        history += [
-            {"role": "user", "content": text},
-            {"role": "assistant", "content": reply},
-        ]
+        if text.lower() in {"quit", "exit"}:
+            break
+        if not text:
+            continue
+        reply, agent = chat("tenant_acme", "maya", text)
         print(f"[{agent}]", reply)

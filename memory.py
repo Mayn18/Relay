@@ -1,3 +1,4 @@
+import contextvars
 import os, time
 from dotenv import load_dotenv
 from falkordb import FalkorDB
@@ -10,15 +11,27 @@ db = FalkorDB(
     password=os.environ["FALKOR_PASSWORD"],
 )
 
-TRACE = []  # every query gets logged here -> becomes the Evidence panel later
+_TRACE = contextvars.ContextVar("relay_trace", default=None)
+
+
+def trace_start():
+    """Call once at the start of a request."""
+    _TRACE.set([])
+
+
+def trace_get():
+    """Snapshot of the current request's trace."""
+    return list(_TRACE.get() or [])
 
 
 def run(tenant, cypher, params=None, write=False):
     params = params or {}
-    g = db.select_graph(tenant)  # one graph per company = isolation
-    TRACE.append(
-        {"tenant": tenant, "cypher": " ".join(cypher.split()), "params": params}
-    )
+    g = db.select_graph(tenant) 
+    trace = _TRACE.get()
+    if trace is not None:
+        trace.append(
+            {"tenant": tenant, "cypher": " ".join(cypher.split()), "params": params}
+        )
     return (g.query if write else g.ro_query)(cypher, params)
 
 
@@ -108,7 +121,7 @@ def seed():
                 write=True,
             )
     seed_knowledge()
-    TRACE.clear()
+
 
 ARTICLES = [  # (id, topic, title, text, plans it applies to)
     ("dup_free", "billing", "Billing on the Free plan",

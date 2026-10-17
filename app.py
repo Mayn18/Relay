@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, send_from_directory
+import threading
 import memory as m
 import agents
 import os
@@ -10,7 +11,7 @@ app = Flask(
     __name__, static_folder=os.path.join(WEB_DIR, "static"), static_url_path="/static"
 )
 TENANTS = {"tenant_acme": "maya", "tenant_bank": "raj"}  # tenant -> demo customer
-histories = {}
+locks = {}  # tenant -> threading.Lock() to serialize access to the graph
 
 
 @app.get("/")
@@ -23,9 +24,11 @@ def state():
     tenant = request.args.get("tenant", "")
     if tenant not in TENANTS:
         return jsonify(error="unknown tenant"), 400
+
+    m.trace_start()
     facts = m.fact_history(tenant, TENANTS[tenant])
     cases = m.case_trail(tenant, TENANTS[tenant])
-    m.TRACE.clear()
+
     return jsonify(facts=facts, cases=cases)
 
 
@@ -33,33 +36,35 @@ def state():
 def chat():
     d = request.get_json()
     tenant = d.get("tenant", "")
+
     if tenant not in TENANTS:  # tenant comes from our allowlist, never the LLM
         return jsonify(error="unknown tenant"), 400
+
     cust = TENANTS[tenant]
     msg = str(d.get("message", "")).strip()[:500]
+
     if not msg:
         return jsonify(error="empty message"), 400
 
-    m.TRACE.clear()
-    h = histories.setdefault(tenant, [])
-    try:
-        reply, agent = agents.chat(tenant, cust, msg, h)
-    except Exception as e:
-        return jsonify(error=str(e)), 500
-    h += [{"role": "user", "content": msg}, {"role": "assistant", "content": reply}]
-    trace = list(m.TRACE)  # copy BEFORE the panel queries add their own
+    m.trace_start()
+
+    with locks.setdefault((tenant, cust), threading.Lock()):
+        try:
+            reply, agent = agents.chat(tenant, cust, msg)
+        except Exception as e:
+            return jsonify(error=str(e)), 500
+    # Snapshot before panel queries add their own trace entries.
+    trace = m.trace_get()
     facts = m.fact_history(tenant, cust)
     cases = m.case_trail(tenant, cust)
-    m.TRACE.clear()
+
     return jsonify(reply=reply, agent=agent, trace=trace, facts=facts, cases=cases)
 
 
 @app.post("/reset")
 def reset():
     m.reset()
-    histories.clear()
     return jsonify(ok=True)
-
 
 @app.get("/graph")
 def graph():
@@ -119,7 +124,7 @@ def graph():
     edges = [
         {"id": i, "source": a, "target": b, "type": t}
         for i, a, b, t in erows
-        if a in visible and b in visible    
+        if a in visible and b in visible
     ]
     moments.discard(None)
     return jsonify(nodes=nodes, edges=edges, moments=sorted(moments))
