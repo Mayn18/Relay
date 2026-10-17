@@ -22,7 +22,30 @@ def tool(name, desc, props, required):
 
 
 S = {"type": "string"}
+
+# --- Guardrails: restrict which facts the model may store
+ALLOWED_FACTS = {"name": 40, "plan": 20}
+PLANS = {"free", "basic", "pro", "enterprise"}
 BILLING_WORDS = ("charged", "refund", "invoice", "billing", "payment", "billed")
+
+def check_fact(key, value):
+    """Returns ((key, value), None) if allowed, else (None, reason)."""
+    key = str(key or "").strip().lower()
+    value = str(value or "").strip()
+
+    if key not in ALLOWED_FACTS:
+        return None, f"'{key}' is not a fact this desk may store"
+
+    if not value or len(value) > ALLOWED_FACTS[key]:
+        return None, f"invalid value for '{key}'"
+
+    if key == "plan":
+        if value.lower() not in PLANS:
+            return None, f"'{value}' is not a known plan"
+        value = value.capitalize()
+
+    return (key, value), None
+
 
 REMEMBER = tool(
     "remember_fact",
@@ -68,8 +91,18 @@ def run_agent(system, tools, tenant, cust, history, user_msg):
         for tc in msg.tool_calls:
             args = json.loads(tc.function.arguments)
             name = tc.function.name
+            result = "ok"
             if name == "remember_fact":
-                m.remember_fact(tenant, cust, args["key"], args["value"])
+                ok, err = check_fact(args.get("key"), args.get("value"))
+
+                if err:
+                    result = "refused: " + err
+                    m.log_event(
+                        tenant, cust, "guardrail", "Blocked write: " + err
+                    )
+                else:
+                    m.remember_fact(tenant, cust, *ok)
+
             elif name == "handoff_to_billing":
                 m.handoff(
                     tenant, cust, "billing", args["summary"], args["reason"], "Billing"
@@ -81,7 +114,7 @@ def run_agent(system, tools, tenant, cust, history, user_msg):
                 )  # case id from the graph, not the LLM
                 if case:
                     m.resolve_case(tenant, cust, case["id"], args["resolution"])
-            msgs.append({"role": "tool", "tool_call_id": tc.id, "content": "ok"})
+            msgs.append({"role": "tool", "tool_call_id": tc.id, "content": result})
         if handed:
             return "", True
     return "", False

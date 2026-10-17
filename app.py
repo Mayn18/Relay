@@ -35,13 +35,17 @@ def chat():
     if tenant not in TENANTS:                  # tenant comes from our allowlist, never the LLM
         return jsonify(error="unknown tenant"), 400
     cust = TENANTS[tenant]
+    msg = str(d.get("message", "")).strip()[:500]
+    if not msg:
+        return jsonify(error="empty message"), 400
+    
     m.TRACE.clear()
     h = histories.setdefault(tenant, [])
     try:
-        reply, agent = agents.chat(tenant, cust, d["message"], h)
+        reply, agent = agents.chat(tenant, cust, msg, h)
     except Exception as e:
         return jsonify(error=str(e)), 500
-    h += [{"role": "user", "content": d["message"]},
+    h += [{"role": "user", "content": msg},
           {"role": "assistant", "content": reply}]
     trace = list(m.TRACE)                      # copy BEFORE the panel queries add their own
     facts = m.fact_history(tenant, cust)

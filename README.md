@@ -56,6 +56,15 @@ The free Cloud tier has no persistence, so `seed()` recreates the demo data on s
 - Single-user demo: the query trace is a shared global.
 - Fictional seed data and a small model, kept simple to fit the time available.
 
+### Memory Guardrails
+
+Relay restricts memory writes to an allowlist of expected facts (`name` and `plan`), validates their lengths, and checks plan values against a known set. Rejected writes are recorded as guardrail events in the graph for inspection in the Evidence panel.
+
+Incoming messages are trimmed, limited to 500 characters, and rejected when empty. Tenant and customer identity are derived from server-side session/application data rather than model-generated tool arguments.
+
+These safeguards reduce accidental or malicious memory poisoning, but they do not prevent all prompt injection or guarantee that every model response is safe. The guardrails should be tested alongside tenant isolation, authentication, and authorization controls.
+
+
 ## AI Use Disclosure
 
 Claude (Anthropic) was used as a coding assistant for project planning and drafting parts of the codebase (`memory.py`, `agents.py`, `app.py`, and the web UI). I ran and tested the application and can explain its graph model and queries. At runtime, the agents use the Gemini API (Google) to access a hosted LLM.
