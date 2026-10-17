@@ -25,20 +25,40 @@ function showTrace(trace) {
   });
 }
 async function switchTenant() {
-  $("log").replaceChildren(); $("trace").textContent = "Send a message to see them.";
+  $("log").replaceChildren();
+  $("trace").textContent = "Send a message to see them.";
   const r = await fetch("/state?tenant=" + $("tenant").value);
-  showFacts((await r.json()).facts);
+  const d = await r.json();
+  showFacts(d.facts);
+  showCases(d.cases);
 }
+
 async function send() {
-  const text = $("box").value.trim(); if (!text) return;
-  $("box").value = ""; add("me", text);
+  const text = $("box").value.trim();
+  if (!text) return;
+  $("box").value = "";
+  add("me", text);
   const r = await fetch("/chat", {
-    method: "POST", headers: { "Content-Type": "application/json" },
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ tenant: $("tenant").value, message: text })
   });
   const d = await r.json();
   if (d.error) { add("bot", "Error: " + d.error); return; }
-  add("bot", d.reply); showTrace(d.trace); showFacts(d.facts);
+  add("bot", "[" + d.agent + "] " + d.reply);
+  showTrace(d.trace);
+  showFacts(d.facts);
+  showCases(d.cases);
+}
+
+function showCases(cases) {
+  const t = document.createElement("table");
+  t.innerHTML = "<tr><th>Case</th><th>Step</th><th>Agent</th><th>Why</th></tr>";
+  cases.forEach(c => {
+    const r = t.insertRow();
+    [`${c.topic} (${c.status})`, c.step, c.agent, c.reason].forEach(x => r.insertCell().textContent = x);
+  });
+  $("cases").replaceChildren(t);
 }
 
 switchTenant();

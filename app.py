@@ -24,8 +24,9 @@ def state():
     if tenant not in TENANTS:
         return jsonify(error="unknown tenant"), 400
     facts = m.fact_history(tenant, TENANTS[tenant])
+    cases = m.case_trail(tenant, TENANTS[tenant])
     m.TRACE.clear()
-    return jsonify(facts=facts)
+    return jsonify(facts=facts, cases=cases)
 
 @app.post("/chat")
 def chat():
@@ -37,15 +38,16 @@ def chat():
     m.TRACE.clear()
     h = histories.setdefault(tenant, [])
     try:
-        reply = agents.chat(tenant, cust, d["message"], h)
-    except Exception as e:                     # e.g. LLM rate limit
+        reply, agent = agents.chat(tenant, cust, d["message"], h)
+    except Exception as e:
         return jsonify(error=str(e)), 500
     h += [{"role": "user", "content": d["message"]},
           {"role": "assistant", "content": reply}]
-    trace = list(m.TRACE)                      # copy BEFORE fact_history adds its own query
+    trace = list(m.TRACE)                      # copy BEFORE the panel queries add their own
     facts = m.fact_history(tenant, cust)
+    cases = m.case_trail(tenant, cust)
     m.TRACE.clear()
-    return jsonify(reply=reply, trace=trace, facts=facts)
+    return jsonify(reply=reply, agent=agent, trace=trace, facts=facts, cases=cases)
 
 if __name__ == "__main__":
     m.seed()

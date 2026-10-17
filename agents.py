@@ -19,62 +19,127 @@ def tool(name, desc, props, required):
     }
 
 
+S = {"type": "string"}
+
+REMEMBER = tool(
+    "remember_fact",
+    "Save or update a fact about the customer (e.g. key='plan', value='Basic'). "
+    "Call whenever the customer states or changes a fact about themselves.",
+    {"key": S, "value": S},
+    ["key", "value"],
+)
+HANDOFF = tool(
+    "handoff_to_billing",
+    "Hand the customer to the Billing agent. Call this for anything about charges, "
+    "refunds, invoices or payments. summary = one sentence on the problem; "
+    "reason = why Billing should take it.",
+    {"summary": S, "reason": S},
+    ["summary", "reason"],
+)
+RESOLVE = tool(
+    "resolve_case",
+    "Close the customer's open case once the billing issue is dealt with. "
+    "resolution = one sentence on what was done.",
+    {"resolution": S},
+    ["resolution"],
+)
 
 
-def chat(tenant, cust, user_msg, history):
-    # Memory is read from the graph on EVERY turn, not kept in Python variables.
-    profile = m.recall_profile(tenant, cust)
-    events = m.recent_events(tenant, cust)
-    system = (
-        "You are the Concierge agent of a support desk. Be brief and friendly.\n"
-        f"Known facts about this customer (from the graph): {json.dumps(profile)}\n"
-        f"Recent conversation (from the graph): {json.dumps(events)}\n"
-        "Use these facts instead of asking again. If the customer states a new fact "
-        "or changes one, call remember_fact."
-    )
+def run_agent(system, tools, tenant, cust, history, user_msg):
+    """Returns (reply, handed_off). tenant and cust come from the session, never the LLM."""
     msgs = (
         [{"role": "system", "content": system}]
         + history
         + [{"role": "user", "content": user_msg}]
     )
-    m.log_event(tenant, cust, "customer", user_msg)
-
-    reply = ""
-    for _ in range(4):  # max 4 LLM round-trips per message
+    for _ in range(4):
         msg = (
-            client.chat.completions.create(model=MODEL, messages=msgs, tools=TOOLS)
+            client.chat.completions.create(model=MODEL, messages=msgs, tools=tools)
             .choices[0]
             .message
         )
         if not msg.tool_calls:
-            reply = msg.content or ""
-            break
+            return msg.content or "", False
         msgs.append(msg)
+        handed = False
         for tc in msg.tool_calls:
             args = json.loads(tc.function.arguments)
-            m.remember_fact(
-                tenant, cust, args["key"], args["value"]
-            )  # tenant/cust come from
-            msgs.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,  # the session, never the LLM
-                    "content": "saved",
-                }
-            )
-    m.log_event(tenant, cust, "concierge", reply)
+            name = tc.function.name
+            if name == "remember_fact":
+                m.remember_fact(tenant, cust, args["key"], args["value"])
+            elif name == "handoff_to_billing":
+                m.handoff(
+                    tenant, cust, "billing", args["summary"], args["reason"], "Billing"
+                )
+                handed = True
+            elif name == "resolve_case":
+                case = m.active_case(
+                    tenant, cust
+                )  # case id from the graph, not the LLM
+                if case:
+                    m.resolve_case(tenant, cust, case["id"], args["resolution"])
+            msgs.append({"role": "tool", "tool_call_id": tc.id, "content": "ok"})
+        if handed:
+            return "", True
+    return "", False
+
+
+def billing_turn(tenant, cust, case, history, user_msg):
+    profile = m.recall_profile(tenant, cust)
+    similar = m.similar_cases(tenant, cust, case["topic"])
+    system = (
+        "You are the Billing agent of a support desk. Be brief and friendly.\n"
+        f"Customer facts (from the graph): {json.dumps(profile)}\n"
+        f"Open case handed to you by the Concierge: {json.dumps(case)}\n"
+        f"Resolved cases of OTHER customers on the same plan (from the graph): {json.dumps(similar)}\n"
+        "Do not ask the customer to repeat what is in the case. If a similar case has a fix "
+        "that fits, tell the customer you are arranging the same fix, then call resolve_case. "
+        "Never promise anything that is not in the similar cases."
+    )
+    reply, _ = run_agent(system, [REMEMBER, RESOLVE], tenant, cust, history, user_msg)
     return reply
+
+
+def chat(tenant, cust, user_msg, history):
+    """Returns (reply, agent_name). Memory is read from the graph on EVERY turn."""
+    profile = m.recall_profile(tenant, cust)
+    events = m.recent_events(tenant, cust)
+    m.log_event(tenant, cust, "customer", user_msg)
+
+    case = m.active_case(tenant, cust)  # routing is a graph query
+    if case and case["agent"] == "Billing":
+        agent, reply = "Billing", billing_turn(tenant, cust, case, history, user_msg)
+    else:
+        system = (
+            "You are the Concierge agent of a support desk. Be brief and friendly.\n"
+            f"Known facts about this customer (from the graph): {json.dumps(profile)}\n"
+            f"Recent conversation (from the graph): {json.dumps(events)}\n"
+            "Use these facts instead of asking again. If the customer states or changes a "
+            "fact, call remember_fact. For anything about charges, refunds, invoices or "
+            "payments, call handoff_to_billing; do not try to solve billing yourself."
+        )
+        agent = "Concierge"
+        reply, handed = run_agent(
+            system, [REMEMBER, HANDOFF], tenant, cust, history, user_msg
+        )
+        if handed:
+            agent = "Billing"
+            reply = billing_turn(
+                tenant, cust, m.active_case(tenant, cust), history, user_msg
+            )
+    m.log_event(tenant, cust, agent.lower(), reply)
+    return reply, agent
 
 
 if __name__ == "__main__":
     m.seed()
-    history = []  # lost on restart ON PURPOSE: the graph is the memory
+    history = []
     print("Chatting as maya @ tenant_acme. Ctrl+C to quit.")
     while True:
         text = input("You: ")
-        reply = chat("tenant_acme", "maya", text, history)
+        reply, agent = chat("tenant_acme", "maya", text, history)
         history += [
             {"role": "user", "content": text},
             {"role": "assistant", "content": reply},
         ]
-        print("Bot:", reply)
+        print(f"[{agent}]", reply)
