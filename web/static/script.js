@@ -69,7 +69,17 @@ function showCases(cases) {
 }
 
 let cy = null;
-const COLORS = { Customer: "#fecaca", Fact: "#bfdbfe", Case: "#fde68a", Agent: "#ddd6fe" };
+const COLORS = {
+  Customer: "#fecaca",
+  Fact: "#bfdbfe",
+  Case: "#fde68a",
+  Agent: "#ddd6fe",
+  Article: "#fdba74",
+  Plan: "#99f6e4",
+  Topic: "#fbcfe8"
+};
+
+const KB = new Set(["Article", "Plan", "Topic"]);
 
 let moments = [];
 
@@ -104,6 +114,16 @@ async function refreshGraph() {
       ? "Now"
       : new Date(at * 1000).toLocaleTimeString();
 
+  const nodes = d.nodes.filter(
+    n => $("kb").checked || !KB.has(n.kind)
+  );
+
+  const ids = new Set(nodes.map(n => n.id));
+
+  const edges = d.edges.filter(
+    e => ids.has(e.source) && ids.has(e.target)
+  );
+
   if (!cy) {
     cy = cytoscape({
       container: $("graph"),
@@ -126,7 +146,7 @@ async function refreshGraph() {
     });
   }
   const keep = new Set(), added = [];
-  d.nodes.forEach(n => {
+  nodes.forEach(n => {
     const id = "n" + n.id; keep.add(id);
     const data = {
       id, label: n.label,
@@ -136,7 +156,7 @@ async function refreshGraph() {
     const ex = cy.getElementById(id);
     if (ex.nonempty()) ex.data(data); else added.push({ data });
   });
-  d.edges.forEach(e => {
+  edges.forEach(e => {
     const id = "e" + e.id; keep.add(id);
     if (cy.getElementById(id).empty())
       added.push({ data: { id, source: "n" + e.source, target: "n" + e.target, label: e.type } });

@@ -46,6 +46,22 @@
           <output id="ttLabel" for="tt">Now</output>
         </div>
 
+        <div class="graph-options">
+          <label class="checkbox-label" for="kb">
+            <input type="checkbox" id="kb" name="show-knowledge" onchange="refreshGraph()">
+            Show policy knowledge
+          </label>
+
+          <div class="graph-legend" aria-label="Graph node legend">
+            <span class="legend-item legend-customer">Customer</span>
+            <span class="legend-item legend-fact">Fact</span>
+            <span class="legend-item legend-case-open">Case (open)</span>
+            <span class="legend-item legend-case-resolved">Case (resolved)</span>
+            <span class="legend-item legend-agent">Agent</span>
+            <span class="legend-item legend-policy">Policy</span>
+          </div>
+        </div>
+
         <div id="graph" class="graph-canvas" role="img"
           aria-label="Interactive graph of customer facts and support cases"></div>
       </section>

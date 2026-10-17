@@ -141,3 +141,54 @@ h3 {
   min-height: 400px;
   min-width: 0;
 }
+
+.graph-options {
+    margin-bottom: 0.5rem;
+}
+
+.checkbox-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin-bottom: 0.4rem;
+    font-size: 0.75rem;
+    cursor: pointer;
+}
+
+.graph-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin: 0.25rem 0;
+    font-size: 0.6875rem;
+}
+
+.legend-item {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+}
+
+.legend-customer {
+    background: #fecaca;
+}
+
+.legend-fact {
+    background: #bfdbfe;
+}
+
+.legend-case-open {
+    background: #fde68a;
+}
+
+.legend-case-resolved {
+    background: #bbf7d0;
+}
+
+.legend-agent {
+    background: #ddd6fe;
+}
+
+.legend-policy {
+    background: #fdba74;
+}
