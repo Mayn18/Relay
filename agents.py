@@ -7,6 +7,7 @@ load_dotenv()
 client = OpenAI(api_key=os.environ["LLM_API_KEY"], base_url=os.environ["LLM_BASE_URL"])
 MODEL = os.environ["LLM_MODEL"]
 
+print(f"Using model {MODEL} at {os.environ['LLM_BASE_URL']}")
 
 def tool(name, desc, props, required):
     return {
