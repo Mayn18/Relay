@@ -9,6 +9,7 @@ MODEL = os.environ["LLM_MODEL"]
 
 print(f"Using model {MODEL} at {os.environ['LLM_BASE_URL']}")
 
+
 def tool(name, desc, props, required):
     return {
         "type": "function",
@@ -21,6 +22,7 @@ def tool(name, desc, props, required):
 
 
 S = {"type": "string"}
+BILLING_WORDS = ("charged", "refund", "invoice", "billing", "payment", "billed")
 
 REMEMBER = tool(
     "remember_fact",
@@ -98,6 +100,9 @@ def billing_turn(tenant, cust, case, history, user_msg):
         "Never promise anything that is not in the similar cases."
     )
     reply, _ = run_agent(system, [REMEMBER, RESOLVE], tenant, cust, history, user_msg)
+    still_open = m.active_case(tenant, cust)
+    if still_open and similar:  # safety net: close with a fix the graph already proves
+        m.resolve_case(tenant, cust, still_open["id"], similar[0]["fix"])
     return reply
 
 
@@ -123,6 +128,20 @@ def chat(tenant, cust, user_msg, history):
         reply, handed = run_agent(
             system, [REMEMBER, HANDOFF], tenant, cust, history, user_msg
         )
+        if (
+            not handed
+            and not m.active_case(tenant, cust)
+            and any(w in user_msg.lower() for w in BILLING_WORDS)
+        ):
+            m.handoff(
+                tenant,
+                cust,
+                "billing",
+                user_msg[:120],
+                "Billing keywords in the message (fallback routing)",
+                "Billing",
+            )
+            handed = True
         if handed:
             agent = "Billing"
             reply = billing_turn(
