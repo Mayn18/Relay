@@ -35,3 +35,5 @@ Thumbs.db
 *.log
 temp
 temp/temp.py
+temp/temp.js
+temp/temp.py

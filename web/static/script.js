@@ -32,6 +32,9 @@ async function switchTenant() {
   showFacts(d.facts);
   showCases(d.cases);
   if (cy) cy.elements().remove();
+  moments = [];
+  $("tt").max = 0;
+  $("tt").value = 0;
   await refreshGraph();
 }
 
@@ -51,6 +54,7 @@ async function send() {
   showTrace(d.trace);
   showFacts(d.facts);
   showCases(d.cases);
+  $("tt").value = $("tt").max;
   await refreshGraph();
 }
 
@@ -65,44 +69,81 @@ function showCases(cases) {
 }
 
 let cy = null;
-const COLORS = {Customer: "#fecaca", Fact: "#bfdbfe", Case: "#fde68a", Agent: "#ddd6fe"};
+const COLORS = { Customer: "#fecaca", Fact: "#bfdbfe", Case: "#fde68a", Agent: "#ddd6fe" };
+
+let moments = [];
+
+function atParam() {
+  const t = $("tt");
+
+  // Slider at the right end = live graph
+  if (!moments.length || +t.value >= +t.max) return null;
+
+  return moments[+t.value];
+}
 
 async function refreshGraph() {
-  const r = await fetch("/graph?tenant=" + $("tenant").value);
+  const at = atParam();
+
+  const r = await fetch("/graph?tenant=" + $("tenant").value +
+    (at !== null ? "&at=" + at : "")
+  );
+
   const d = await r.json();
   if (d.error) return;
+
+  moments = Array.isArray(d.moments) ? d.moments : [];
+
+  const t = $("tt");
+  t.max = Math.max(moments.length - 1, 0);
+
+  if (at === null) t.value = t.max;
+
+  $("ttLabel").textContent =
+    at === null
+      ? "Now"
+      : new Date(at * 1000).toLocaleTimeString();
+
   if (!cy) {
     cy = cytoscape({
       container: $("graph"),
       style: [
-        {selector: "node", style: {
-          "background-color": "data(color)", "label": "data(label)", "font-size": "10px",
-          "text-valign": "center", "text-wrap": "wrap", "text-max-width": "70px",
-          "shape": "round-rectangle", "width": "label", "height": "label",
-          "padding": "8px", "opacity": "data(opacity)"}},
-        {selector: "edge", style: {
-          "curve-style": "bezier", "target-arrow-shape": "triangle", "label": "data(label)",
-          "font-size": "8px", "line-color": "#999", "target-arrow-color": "#999", "width": 1.5}}
+        {
+          selector: "node", style: {
+            "background-color": "data(color)", "label": "data(label)", "font-size": "10px",
+            "text-valign": "center", "text-wrap": "wrap", "text-max-width": "70px",
+            "shape": "round-rectangle", "width": "label", "height": "label",
+            "padding": "8px", "opacity": "data(opacity)"
+          }
+        },
+        {
+          selector: "edge", style: {
+            "curve-style": "bezier", "target-arrow-shape": "triangle", "label": "data(label)",
+            "font-size": "8px", "line-color": "#999", "target-arrow-color": "#999", "width": 1.5
+          }
+        }
       ]
     });
   }
   const keep = new Set(), added = [];
   d.nodes.forEach(n => {
     const id = "n" + n.id; keep.add(id);
-    const data = {id, label: n.label,
+    const data = {
+      id, label: n.label,
       color: n.resolved ? "#bbf7d0" : n.closed ? "#e5e7eb" : (COLORS[n.kind] || "#eee"),
-      opacity: n.closed ? 0.5 : 1};
+      opacity: n.closed ? 0.5 : 1
+    };
     const ex = cy.getElementById(id);
-    if (ex.nonempty()) ex.data(data); else added.push({data});
+    if (ex.nonempty()) ex.data(data); else added.push({ data });
   });
   d.edges.forEach(e => {
     const id = "e" + e.id; keep.add(id);
     if (cy.getElementById(id).empty())
-      added.push({data: {id, source: "n" + e.source, target: "n" + e.target, label: e.type}});
+      added.push({ data: { id, source: "n" + e.source, target: "n" + e.target, label: e.type } });
   });
   cy.elements().filter(el => !keep.has(el.id())).remove();
   if (added.length) cy.add(added);
-  cy.layout({name: "cose", animate: true, randomize: false, fit: true, padding: 20}).run();
+  cy.layout({ name: "cose", animate: true, randomize: false, fit: true, padding: 20 }).run();
 }
 
 async function resetDemo() {

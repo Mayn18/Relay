@@ -33,10 +33,22 @@
     </div>
 
     <div class="col">
-      <div class="card" style="flex:1;display:flex;flex-direction:column">
-        <h3>Live graph (updates after every reply)</h3>
-        <div id="graph" style="flex:1;min-height:400px"></div>
-      </div>
+      <section class="card graph-card" aria-labelledby="graph-title">
+        <h3 id="graph-title">Live graph</h3>
+        <p class="graph-description">Updates after every reply.</p>
+
+        <div class="time-control">
+          <label for="tt">Time travel</label>
+
+          <input type="range" id="tt" name="timestamp" min="0" max="0" value="0" aria-describedby="ttLabel"
+            oninput="refreshGraph()">
+
+          <output id="ttLabel" for="tt">Now</output>
+        </div>
+
+        <div id="graph" class="graph-canvas" role="img"
+          aria-label="Interactive graph of customer facts and support cases"></div>
+      </section>
     </div>
 
     <div class="col">
