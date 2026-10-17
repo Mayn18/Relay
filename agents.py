@@ -1,6 +1,7 @@
 import os, json
 from dotenv import load_dotenv
 from openai import OpenAI
+import time
 import memory as m
 
 load_dotenv()
@@ -27,6 +28,7 @@ S = {"type": "string"}
 ALLOWED_FACTS = {"name": 40, "plan": 20}
 PLANS = {"free", "basic", "pro", "enterprise"}
 BILLING_WORDS = ("charged", "refund", "invoice", "billing", "payment", "billed")
+
 
 def check_fact(key, value):
     """Returns ((key, value), None) if allowed, else (None, reason)."""
@@ -71,6 +73,25 @@ RESOLVE = tool(
 )
 
 
+def llm(msgs, tools):
+    """Call the model, retrying twice on provider errors (free tiers fail now and then)."""
+    for attempt in range(3):
+        try:
+            return (
+                client.chat.completions.create(
+                    model=MODEL,
+                    messages=msgs,
+                    tools=tools,
+                )
+                .choices[0]
+                .message
+            )
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(1.5 * (attempt + 1))
+
+
 def run_agent(system, tools, tenant, cust, history, user_msg):
     """Returns (reply, handed_off). tenant and cust come from the session, never the LLM."""
     msgs = (
@@ -79,11 +100,7 @@ def run_agent(system, tools, tenant, cust, history, user_msg):
         + [{"role": "user", "content": user_msg}]
     )
     for _ in range(4):
-        msg = (
-            client.chat.completions.create(model=MODEL, messages=msgs, tools=tools)
-            .choices[0]
-            .message
-        )
+        msg = llm(msgs, tools)
         if not msg.tool_calls:
             return msg.content or "", False
         msgs.append(msg)
@@ -97,9 +114,7 @@ def run_agent(system, tools, tenant, cust, history, user_msg):
 
                 if err:
                     result = "refused: " + err
-                    m.log_event(
-                        tenant, cust, "guardrail", "Blocked write: " + err
-                    )
+                    m.log_event(tenant, cust, "guardrail", "Blocked write: " + err)
                 else:
                     m.remember_fact(tenant, cust, *ok)
 
@@ -120,7 +135,7 @@ def run_agent(system, tools, tenant, cust, history, user_msg):
     return "", False
 
 
-def billing_turn(tenant, cust, case, history, user_msg):
+def billing_turn(tenant, cust, case, history, user_msg, fresh=False):
     profile = m.recall_profile(tenant, cust)
     similar = m.similar_cases(tenant, cust, case["topic"])
     policies = m.policies_for(tenant, cust, case["topic"])
@@ -133,11 +148,15 @@ def billing_turn(tenant, cust, case, history, user_msg):
         "Base every promise on the policy or on the similar cases. If one covers the issue, tell the "
         "customer exactly what will happen, then call resolve_case. If neither covers it, say you are "
         "escalating to a human and do NOT call resolve_case or promise anything. "
-        "Do not ask the customer to repeat what is in the case."
+        "Do not ask the customer to repeat what is in the case.\n"
+        "Only call resolve_case if the customer's latest message is about this case. "
+        "If it is about something else, answer briefly and mention the case is still open.\n"
     )
     reply, _ = run_agent(system, [REMEMBER, RESOLVE], tenant, cust, history, user_msg)
     still_open = m.active_case(tenant, cust)
-    if still_open and similar:  # safety net: close with a fix the graph already proves
+    if (
+        fresh and still_open and (similar or policies)
+    ):  # safety net: close with a fix the graph already proves
         m.resolve_case(
             tenant,
             cust,
@@ -145,6 +164,7 @@ def billing_turn(tenant, cust, case, history, user_msg):
             similar[0]["fix"] if similar else policies[0]["text"],
         )
     return reply
+
 
 def history_from_graph(events):
     """Rebuild the chat history from Event nodes, so no state lives in Python."""
@@ -154,9 +174,12 @@ def history_from_graph(events):
         if who != "guardrail" and text
     ]
 
+
 def chat(tenant, cust, user_msg):
-    
     """Returns (reply, agent_name). Memory is read from the graph on EVERY turn."""
+
+    m.expire_stale_cases(tenant, cust)
+
     profile = m.recall_profile(tenant, cust)
     events = m.recent_events(tenant, cust)
     history = history_from_graph(events)
@@ -197,7 +220,12 @@ def chat(tenant, cust, user_msg):
         if handed:
             agent = "Billing"
             reply = billing_turn(
-                tenant, cust, m.active_case(tenant, cust), history, user_msg
+                tenant,
+                cust,
+                m.active_case(tenant, cust),
+                history,
+                user_msg,
+                fresh=True,
             )
     m.log_event(tenant, cust, agent.lower(), reply)
     return reply, agent

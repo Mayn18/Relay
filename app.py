@@ -50,9 +50,10 @@ def chat():
 
     with locks.setdefault((tenant, cust), threading.Lock()):
         try:
-            reply, agent = agents.chat(tenant, cust, msg)
-        except Exception as e:
-            return jsonify(error=str(e)), 500
+            reply, agent = agents.chat(tenant, cust, msg)            
+        except Exception:
+            app.logger.exception("chat failed")
+            return jsonify(error="The model provider had a hiccup. Please send that again."), 500
     # Snapshot before panel queries add their own trace entries.
     trace = m.trace_get()
     facts = m.fact_history(tenant, cust)
@@ -105,7 +106,7 @@ def graph():
         elif kind == "Fact":
             label = f"{p.get('key')}={p.get('value')}"
         elif kind == "Case":
-            label = f"{p.get('topic')} ({'resolved' if resolved else 'open'})"
+            label = f"{p.get('topic')} ({p.get('status') if resolved else 'open'})"
         else:
             label = p.get("name") or p.get("title") or kind
         visible.add(nid)
