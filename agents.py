@@ -32,6 +32,9 @@ S = {"type": "string"}
 # --- Guardrails: restrict which facts the model may store
 ALLOWED_FACTS = {"name": 40, "plan": 20}
 PLANS = {"free", "basic", "pro", "enterprise"}
+# Billing may answer this many times per case; after that the case is escalated to a human so an
+# unresolved case cannot hold the customer indefinitely.
+BILLING_MAX_TURNS = int(os.environ.get("BILLING_MAX_TURNS", "4"))
 
 
 def check_fact(key, value):
@@ -71,9 +74,17 @@ HANDOFF = tool(
 RESOLVE = tool(
     "resolve_case",
     "Close the customer's open case once the billing issue is dealt with. "
-    "resolution = one sentence on what was done.",
-    {"resolution": S},
-    ["resolution"],
+    "resolution = one sentence on what was done. basis = the id of the policy article that covers "
+    "this billing issue (from the policy list you were given), or 'precedent' if a similar case does.",
+    {"resolution": S, "basis": S},
+    ["resolution", "basis"],
+)
+ESCALATE = tool(
+    "escalate_case",
+    "Hand the case to a human when no policy or similar case covers the issue. "
+    "reason = one sentence for the human agent.",
+    {"reason": S},
+    ["reason"],
 )
 
 
@@ -96,8 +107,9 @@ def llm(msgs, tools):
             time.sleep(1.5 * (attempt + 1))
 
 
-def run_agent(system, tools, tenant, cust, history, user_msg):
-    """Returns (reply, handed_off). tenant and cust come from the session, never the LLM."""
+def run_agent(system, tools, tenant, cust, history, user_msg, resolvable=()):
+    """Returns (reply, handed_off). tenant and cust come from the session, never the LLM.
+    resolvable = the basis values resolve_case may cite for this turn (policy ids of the case topic, 'precedent')."""
     msgs = (
         [{"role": "system", "content": system}]
         + history
@@ -141,9 +153,20 @@ def run_agent(system, tools, tenant, cust, history, user_msg):
                         handed = True
                 elif name == "resolve_case":
                     case = m.active_case(tenant, cust)  # case id from the graph, not the LLM
-                    if case:
+                    basis = str(args.get("basis") or "").strip()
+                    if not case:
+                        result = "error: there is no open case"
+                    elif basis not in resolvable:
+                        result = ("error: resolve_case needs a basis that covers this case's billing issue; "
+                                  f"allowed: {sorted(resolvable) or 'none (escalate instead)'}")
+                    else:
                         resolution = str(args.get("resolution") or "Resolved").strip()[:300]
                         m.resolve_case(tenant, cust, case["id"], resolution)
+                elif name == "escalate_case":
+                    case = m.active_case(tenant, cust)
+                    if case:
+                        reason = str(args.get("reason") or "Needs a human").strip()[:300]
+                        m.escalate_case(tenant, cust, case["id"], "Escalated: " + reason)
                     else:
                         result = "error: there is no open case"
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": result})
@@ -156,20 +179,26 @@ def billing_turn(tenant, cust, case, history, user_msg):
     profile = m.recall_profile(tenant, cust)
     similar = m.similar_cases(tenant, cust, case["topic"])
     policies = m.policies_for(tenant, cust)  # all policy topics for the current plan
+    # resolve_case may only cite a policy about THIS case's topic, or a real precedent
+    resolvable = {p["id"] for p in m.policies_for(tenant, cust, case["topic"])}
+    if similar:
+        resolvable.add("precedent")
     system = (
         "You are the Billing agent of a support desk. Be brief and friendly.\n"
         f"Customer facts (from the graph): {json.dumps(profile)}\n"
         f"Open case handed to you by the Concierge: {json.dumps(case)}\n"
         f"Resolved cases of OTHER customers on the same plan (from the graph): {json.dumps(similar)}\n"
         f"Company policy for this customer's current plan (from the graph): {json.dumps(policies)}\n"
-        "Base every promise on the policy or on the similar cases. If one covers the issue, tell the "
-        "customer exactly what will happen, then call resolve_case. If neither covers it, say you are "
-        "escalating to a human and do NOT call resolve_case or promise anything. "
+        "Base every promise on the policy or on the similar cases. If one covers the case's billing issue, "
+        "tell the customer exactly what will happen, then call resolve_case with basis = that policy's id "
+        "(or 'precedent'). If neither covers it, tell the customer you are escalating to a human, call "
+        "escalate_case, and do NOT call resolve_case or promise anything. "
         "Do not ask the customer to repeat what is in the case.\n"
-        "Only call resolve_case if the customer's latest message is about this case. "
-        "If it is about something else, answer briefly and mention the case is still open.\n"
+        "Only call resolve_case or escalate_case if the customer's latest message is about this case. "
+        "If it is about something else (for example a plan change), answer it briefly from the policies, "
+        "mention the case is still open, and do not close it.\n"
     )
-    reply, _ = run_agent(system, [REMEMBER, RESOLVE], tenant, cust, history, user_msg)
+    reply, _ = run_agent(system, [REMEMBER, RESOLVE, ESCALATE], tenant, cust, history, user_msg, resolvable)
     return reply
 
 
@@ -193,6 +222,10 @@ def chat(tenant, cust, user_msg):
     m.log_event(tenant, cust, "customer", user_msg)
 
     case = m.active_case(tenant, cust)  # routing is a graph query
+    if case and case["agent"] == "Billing" and m.billing_turns(tenant, cust, case) >= BILLING_MAX_TURNS:
+        m.escalate_case(tenant, cust, case["id"],
+                        f"Escalated: Billing did not close the case within {BILLING_MAX_TURNS} replies")
+        case = None  # the customer is released back to the Concierge
     if case and case["agent"] == "Billing":
         agent, reply = "Billing", billing_turn(tenant, cust, case, history, user_msg)
     else:

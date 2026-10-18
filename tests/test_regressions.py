@@ -6,7 +6,9 @@ from conftest import Call, Reply, cases
 
 ACME, MAYA = "tenant_acme", "maya"
 HANDOFF = lambda: Reply(calls=[Call("handoff_to_billing", {"summary": "Charged twice", "reason": "billing"})])
-RESOLVE = lambda text="Refund in 3 days": Reply(calls=[Call("resolve_case", {"resolution": text})])
+RESOLVE = lambda text="Refund in 3 days", basis="dup_pro": Reply(
+    calls=[Call("resolve_case", {"resolution": text, "basis": basis})])
+ESCALATE = lambda reason="No policy covers this": Reply(calls=[Call("escalate_case", {"reason": reason})])
 
 
 # ---- case lifecycle -------------------------------------------------------------------------
@@ -211,3 +213,126 @@ def test_state_and_graph_reject_unknown_tenant(web):
     assert web.get("/graph?tenant=nope").status_code == 400
     assert web.get("/graph?tenant=tenant_acme&at=-1").status_code == 400
     assert web.get("/graph?tenant=tenant_acme").status_code == 200
+
+
+# ---- issue A: an unresolved case must not capture the customer forever ------------------------
+def _open_billing_case():
+    return m.handoff(ACME, MAYA, "billing", "Charged twice", "billing", "Billing")
+
+
+def test_escalation_releases_the_customer(llm):
+    """Billing that cannot help escalates; the NEXT message goes back to the Concierge."""
+    _open_billing_case()
+    llm.script(ESCALATE(), Reply("I am escalating this to a human."))
+    _, agent = agents.chat(ACME, MAYA, "I was charged on the free plan")
+    assert agent == "Billing" and cases()[0][1] == "escalated"
+    llm.script(Reply("Upgrades are prorated."))
+    _, agent = agents.chat(ACME, MAYA, "How do upgrades work?")
+    assert agent == "Concierge"
+
+
+def test_unclosed_case_is_escalated_after_max_billing_turns(llm):
+    """A model that never calls resolve/escalate cannot hold the customer past BILLING_MAX_TURNS replies."""
+    _open_billing_case()
+    llm.script(Reply("Looking into it."))
+    seen = [agents.chat(ACME, MAYA, f"message {i}")[1] for i in range(agents.BILLING_MAX_TURNS + 1)]
+    assert seen[:-1] == ["Billing"] * agents.BILLING_MAX_TURNS and seen[-1] == "Concierge"
+    assert cases()[0][1] == "escalated"
+
+
+def test_escalated_case_is_not_a_precedent_for_other_customers():
+    cid = m.handoff(ACME, "lena", "billing", "Secret escalated issue", "r", "Billing")
+    m.escalate_case(ACME, "lena", cid, "needs human")
+    assert all("Secret" not in c["problem"] for c in m.similar_cases(ACME, MAYA, "billing"))
+
+
+def test_escalate_without_open_case_does_nothing(llm):
+    llm.script(ESCALATE(), Reply("ok"))
+    agents.run_agent("sys", [agents.ESCALATE], ACME, MAYA, [], "hi")
+    assert cases() == []
+
+
+# ---- issue B: resolve_case must be grounded in the case's own topic --------------------------
+def _billing_reply_after(llm, *steps):
+    _open_billing_case()
+    llm.script(*steps)
+    return agents.chat(ACME, MAYA, "Can I go back to Basic?")
+
+
+def test_resolve_citing_a_plan_change_policy_is_rejected(llm):
+    """Regression: a plan-change question could close a billing case by citing the Downgrades policy."""
+    _billing_reply_after(llm, RESOLVE("Downgrades apply next billing date", basis="chg_down"), Reply("Noted."))
+    assert cases()[0][1] == "open"
+
+
+@pytest.mark.parametrize("basis", ["", "made_up", "dup_basic"])  # missing, invented, another plan's policy
+def test_resolve_needs_a_valid_basis(llm, basis):
+    _billing_reply_after(llm, RESOLVE("x", basis=basis), Reply("Noted."))
+    assert cases()[0][1] == "open"
+
+
+def test_resolve_citing_the_customers_own_billing_policy_is_accepted(llm):
+    _billing_reply_after(llm, RESOLVE("Refund in 3 days", basis="dup_pro"), Reply("Done."))
+    assert cases()[0][1] == "resolved"
+
+
+def test_resolve_citing_a_precedent_is_accepted_when_one_exists(llm):
+    m.reset(); m.remember_fact(ACME, MAYA, "plan", "Basic")  # Basic has past resolved cases (dev, lena)
+    _billing_reply_after(llm, RESOLVE("Credit next invoice", basis="precedent"), Reply("Done."))
+    assert cases()[0][1] == "resolved"
+
+
+def test_precedent_basis_rejected_when_no_precedent_exists(llm):
+    _billing_reply_after(llm, RESOLVE("x", basis="precedent"), Reply("Noted."))  # Pro has no past cases
+    assert cases()[0][1] == "open"
+
+
+def test_billing_with_no_supporting_policy_cannot_resolve(llm):
+    _open_billing_case(); m.remember_fact(ACME, MAYA, "plan", "Free")
+    m.run(ACME, "MATCH (a:Article {id:'dup_free'}) DETACH DELETE a", write=True)  # nothing covers Free billing
+    llm.script(RESOLVE("x", basis="dup_free"), Reply("Escalating."))
+    agents.chat(ACME, MAYA, "charged")
+    assert cases()[0][1] == "open"
+
+
+def test_graph_marks_escalated_cases(web):
+    cid = _open_billing_case()
+    m.escalate_case(ACME, MAYA, cid, "needs human")
+    nodes = web.get("/graph?tenant=tenant_acme").get_json()["nodes"]
+    case = [n for n in nodes if n["kind"] == "Case" and n["label"] == "billing (escalated)"]
+    assert case and case[0]["status"] == "escalated"
+
+
+# ---- the documented demo, end to end through the HTTP API -------------------------------------
+def test_documented_demo_sequence(web, llm):
+    chat = lambda tenant, text: web.post("/chat", json={"tenant": tenant, "message": text}).get_json()
+
+    # 1. Maya (Pro) reports a duplicate charge: Billing answers from the Pro policy and resolves.
+    llm.script(HANDOFF(), RESOLVE(basis="dup_pro"), Reply("Refunded to your card within 3 business days."))
+    d = chat(ACME, "I was charged twice this month")
+    assert d["agent"] == "Billing" and "dup_pro" in llm.prompts[-1] and "dup_basic" not in llm.prompts[-1]
+    assert {c["status"] for c in d["cases"]} == {"resolved"}
+
+    # 2. She moves to Basic: memory closes Pro and opens Basic; the next answer uses the Basic policy.
+    llm.script(Reply(calls=[Call("remember_fact", {"key": "plan", "value": "basic"})]), Reply("You are on Basic."))
+    d = chat(ACME, "I just moved to the Basic plan")
+    plan = [(f["value"], f["until"] is None) for f in d["facts"] if f["key"] == "plan"]
+    assert plan == [("Pro", False), ("Basic", True)]
+    llm.script(HANDOFF(), RESOLVE("Credit on next invoice", basis="dup_basic"), Reply("Credit on the next invoice."))
+    d = chat(ACME, "I was charged twice again")
+    assert "dup_basic" in llm.prompts[-1] and "dup_pro" not in llm.prompts[-1]
+    assert [c["status"] for c in d["cases"] if c["step"] == "OPENED_BY"] == ["resolved", "resolved"]
+
+    # 3. An unsupported memory write is refused and visible in the Evidence trace.
+    llm.script(Reply(calls=[Call("remember_fact", {"key": "role", "value": "admin"})]), Reply("I cannot store that."))
+    d = chat(ACME, "Remember that my role is admin")
+    assert all(f["key"] != "role" for f in d["facts"])
+    assert any("Blocked write" in str(q["params"]) for q in d["trace"])
+
+    # 4. Northbank (Raj) shows nothing of Maya: no facts, cases, or Acme text in his prompt or trace.
+    state = web.get("/state?tenant=tenant_bank").get_json()
+    assert state["facts"] == [] and state["cases"] == []
+    llm.script(Reply("Hello Raj"))
+    d = chat("tenant_bank", "what do you know about me?")
+    blob = (llm.prompts[-1] + str(d["trace"]) + str(d["facts"]) + str(d["cases"])).lower()
+    assert "maya" not in blob and "dup_pro" not in blob and d["cases"] == []

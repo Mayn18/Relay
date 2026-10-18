@@ -208,3 +208,4 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
     .graph-canvas { height: 320px; }
     #trace { max-height: 260px; overflow: auto; }
 }
+.legend-case-escalated { background: #fed7aa; }

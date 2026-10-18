@@ -181,7 +181,8 @@ async function refreshGraph() {
     const id = "n" + n.id; keep.add(id);
     const data = {
       id, label: n.label,
-      color: n.resolved ? "#bbf7d0" : n.closed ? "#e5e7eb" : (COLORS[n.kind] || "#eee"),
+      color: n.resolved ? (n.status === "escalated" ? "#fed7aa" : n.status === "expired" ? "#e5e7eb" : "#bbf7d0")
+        : n.closed ? "#e5e7eb" : (COLORS[n.kind] || "#eee"),
       opacity: n.closed ? 0.5 : 1
     };
     const ex = cy.getElementById(id);

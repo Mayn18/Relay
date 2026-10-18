@@ -224,13 +224,13 @@ def active_case(tenant, cust):
     r = run(
         tenant,
         """MATCH (:Customer {id:$cust})-[:HAS_CASE]->(k:Case {status:'open'})-[h:HANDED_TO]->(a:Agent)
-                       RETURN k.id, k.topic, k.summary, a.name ORDER BY h.at DESC LIMIT 1""",
+                       RETURN k.id, k.topic, k.summary, a.name, k.opened_at ORDER BY h.at DESC LIMIT 1""",
         {"cust": cust},
     )
     if not r.result_set:
         return None
-    i, t, s, a = r.result_set[0]
-    return {"id": i, "topic": t, "summary": s, "agent": a}
+    i, t, s, a, o = r.result_set[0]
+    return {"id": i, "topic": t, "summary": s, "agent": a, "opened_at": o}
 
 
 def resolve_case(tenant, cust, case_id, resolution):
@@ -241,6 +241,28 @@ def resolve_case(tenant, cust, case_id, resolution):
         {"cust": cust, "cid": case_id, "res": resolution, "now": int(time.time())},
         write=True,
     )
+
+
+def escalate_case(tenant, cust, case_id, reason):
+    """Hand an open case to a human: it stops routing messages to Billing and is never used as a precedent."""
+    run(
+        tenant,
+        """MATCH (:Customer {id:$cust})-[:HAS_CASE]->(k:Case {id:$cid, status:'open'})
+                   SET k.status = 'escalated', k.resolution = $res, k.resolved_at = $now""",
+        {"cust": cust, "cid": case_id, "res": reason, "now": int(time.time())},
+        write=True,
+    )
+
+
+def billing_turns(tenant, cust, case):
+    """How many Billing replies this case has already had (counted from the graph, not Python state)."""
+    r = run(
+        tenant,
+        """MATCH (:Customer {id:$cust})-[:HAD_EVENT]->(e:Event {who:'billing'})
+                       WHERE e.at >= $since RETURN count(e)""",
+        {"cust": cust, "since": int(case["opened_at"]) * 1000},
+    )
+    return r.result_set[0][0] if r.result_set else 0
 
 
 def similar_cases(tenant, cust, topic):

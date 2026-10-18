@@ -42,7 +42,7 @@ class Reply:
 class FakeLLM:
     """Plays back a script: each step is a Reply, or an Exception to raise. The last step repeats."""
     def __init__(self):
-        self.steps, self.calls = [], 0
+        self.steps, self.calls, self.prompts = [], 0, []
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=self._create))
 
     def script(self, *steps):
@@ -50,6 +50,7 @@ class FakeLLM:
 
     def _create(self, model, messages, tools=None, **kw):
         self.calls += 1
+        self.prompts.append(messages[0]["content"])  # system prompt of every model call
         step = self.steps.pop(0) if len(self.steps) > 1 else self.steps[0]
         if isinstance(step, Exception):
             raise step

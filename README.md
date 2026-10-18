@@ -63,7 +63,7 @@ graph LR
 | `Customer` | `id` |
 | `Fact` | `key`, `value`, `since`, `until` (empty while current) |
 | `Event` | `who`, `text`, `at` (every chat message) |
-| `Case` | `id`, `topic`, `summary`, `status` (`open`, `resolved` or `expired`), `resolution`, `opened_at`, `resolved_at` |
+| `Case` | `id`, `topic`, `summary`, `status` (`open`, `resolved`, `escalated` or `expired`), `resolution`, `opened_at`, `resolved_at` |
 | `Agent` | `name` |
 | `Article`, `Topic`, `Plan` | company policy knowledge (seeded for Acme Cloud only) |
 
@@ -76,7 +76,7 @@ A customer's current plan (`Fact` with `key = 'plan'` and no `until`) is matched
 - `active_case`: the customer's open case and which agent holds it. This is the routing decision.
 - `similar_cases`: 3-hop query over same-plan customers' resolved cases.
 - `policies_for`: GraphRAG-lite retrieval of the policy articles for the customer's current plan.
-- `handoff`, `resolve_case`, `expire_stale_cases`: the case lifecycle.
+- `handoff`, `resolve_case`, `escalate_case`, `expire_stale_cases`: the case lifecycle.
 - `case_trail`, `fact_history`: what the UI panels show.
 
 The UI's **Evidence panel** shows the exact Cypher (and parameters) behind every reply.
@@ -85,10 +85,14 @@ The UI's **Evidence panel** shows the exact Cypher (and parameters) behind every
 
 - **Concierge** can call `remember_fact` and `handoff_to_billing`. It answers policy questions from
   the retrieved articles.
-- **Billing** can call `remember_fact` and `resolve_case`. It is given the customer's facts, the case,
-  similar cases and the plan's policy, and is told to promise only what those support, and to say it
-  is escalating when nothing covers the issue.
-- **Case lifecycle:** `open` -> `resolved` (when Billing resolves it) or `expired` (an open case is
+- **Billing** can call `remember_fact`, `resolve_case` and `escalate_case`. It is given the customer's
+  facts, the case, similar cases and the plan's policies, and is told to promise only what those support.
+  `resolve_case` must cite a `basis`: the id of a policy about the case's own topic (billing), or
+  `precedent` when a similar resolved case exists. The code rejects anything else, so for example the
+  plan-change "Downgrades" policy cannot close a billing case. If nothing covers the issue, Billing
+  calls `escalate_case`.
+- **Case lifecycle:** `open` -> `resolved` (Billing resolved it with a valid basis), `escalated` (Billing handed it to a human,
+  or did not close it within 4 replies, `BILLING_MAX_TURNS`) or `expired` (an open case is
   closed automatically after 15 minutes with no chat activity, so an abandoned case cannot capture a
   later conversation; set `CASE_TTL_MINUTES` to change it). While a case is open, messages go to Billing.
 - **Guardrails:** the model may only store the facts `name` and `plan`; values are length-limited and
@@ -131,6 +135,7 @@ Requires Python 3.12.
 | `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | Any OpenAI-compatible chat API with tool calling |
 | `LLM_TIMEOUT` (optional, default `30`) | Seconds before one model call is abandoned and retried |
 | `CASE_TTL_MINUTES` (optional, default `15`) | Minutes of silence before an open case expires |
+| `BILLING_MAX_TURNS` (optional, default `4`) | Billing replies per case before it is escalated to a human |
 
 Demo data (Maya at Acme Cloud and Raj at Northbank, two past Acme customers with resolved billing cases, the policy articles) is created
 automatically on start-up and is safe to re-run. The free FalkorDB Cloud tier has no persistence, so
@@ -156,9 +161,12 @@ the data is recreated each time.
   `/reset` only rejects cross-site requests. Run it locally; do not expose it publicly as is.
 - **Single process.** Each customer's turns are serialized by an in-process lock, so run one server
   process. This is Flask's development server.
-- **Case handling.** While a case is open, every message goes to Billing until it is resolved or
-  expires. Expiry counts from the last chat message (or from when the case opened, if there is none). Whether a case is
-  resolved depends on the model calling `resolve_case`.
+- **Case handling.** While a case is open, messages go to Billing until it is resolved, escalated or
+  expires. A case that Billing never closes is escalated after 4 Billing replies, so it cannot hold the
+  customer indefinitely, but those replies still go to Billing even if some are off-topic. Expiry
+  counts from the last chat message. Whether a case is resolved or escalated depends on the model
+  calling the right tool. The `basis` check stops a case being closed on another topic's policy, but
+  it cannot tell whether an off-topic message happens to cite a valid billing policy.
 - **Knowledge.** The policies are six short fictional articles for Acme Cloud only, and the customer's
   plan is whatever they tell the agent (it is not verified against a billing system).
 - **Guardrails** block unexpected facts and malformed tool calls. They do not stop all prompt injection.
@@ -175,7 +183,7 @@ pip install -r requirements.txt -r requirements-dev.txt
 python -m pytest tests
 ```
 
-They cover case lifecycle and expiry, tool-call validation, guardrails, plan-aware policy retrieval,
+They cover case lifecycle, escalation, grounded resolution and expiry, tool-call validation, guardrails, plan-aware policy retrieval,
 provider failures and retries, tenant isolation and the HTTP layer. They do **not** exercise a real model,
 a browser or Docker. Those are checked by hand with the demo script above.
 
@@ -186,7 +194,7 @@ a browser or Docker. Those are checked by hand with the demo script above.
 | "The model provider had a hiccup" | The model API failed three times in a row (rate limit, 5xx, timeout). Send the message again, or switch to a more reliable tool-calling model. Free models fail often. |
 | `KeyError: 'LLM_API_KEY'` or `ValueError` on `FALKOR_PORT` at start | `.env` is missing or still has empty values. Copy `.env.example` and fill it in. |
 | Graph panel stays empty | The browser cannot load Cytoscape from the CDN (no internet), or the server is not running. |
-| Billing keeps answering after the issue is dealt with | The model did not call `resolve_case`. The case expires after the idle timeout, or click **Reset demo**. |
+| Billing keeps answering after the issue is dealt with | The model did not call `resolve_case` or `escalate_case`. After 4 Billing replies the case is escalated automatically, or click **Reset demo**. |
 | Billing says it has no information | The policy for that topic is not in the graph for the customer's current plan (Northbank has no articles by design). |
 | **Reset demo** says it failed behind a proxy or tunnel | `/reset` rejects requests whose `Origin` differs from the server's own address. Use http://localhost:5000 directly. |
 
