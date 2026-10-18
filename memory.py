@@ -202,17 +202,23 @@ def handoff(tenant, cust, topic, summary, reason, to_agent):
     )
     return cid
 
-CASE_TTL = 15 * 60  # seconds an open case may sit before it expires
+CASE_TTL = int(os.environ.get("CASE_TTL_MINUTES", "15")) * 60  # idle seconds before an open case expires
 
 
 def expire_stale_cases(tenant, cust):
-    """Close cases left open by an abandoned or failed conversation, so they cannot hijack new ones."""
+    """Close cases left open by an abandoned or failed conversation, so they cannot hijack new ones.
+    A case expires after CASE_TTL seconds with no chat activity (latest message, or the time it opened)."""
     now = int(time.time())
-    run(tenant, """MATCH (:Customer {id:$cust})-[:HAS_CASE]->(k:Case {status:'open'})
-                   WHERE k.opened_at < $cutoff
+    run(tenant, """MATCH (c:Customer {id:$cust})-[:HAS_CASE]->(k:Case {status:'open'})
+                   OPTIONAL MATCH (c)-[:HAD_EVENT]->(e:Event)
+                   WITH k, max(e.at) AS last_ms
+                   WITH k, CASE WHEN last_ms IS NULL OR last_ms / 1000 < k.opened_at
+                                THEN k.opened_at ELSE last_ms / 1000 END AS last_active
+                   WHERE last_active < $cutoff
                    SET k.status = 'expired', k.resolved_at = $now,
                        k.resolution = 'Expired: no activity'""",
         {"cust": cust, "cutoff": now - CASE_TTL, "now": now}, write=True)
+
 
 def active_case(tenant, cust):
     r = run(

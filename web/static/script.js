@@ -5,6 +5,7 @@ function add(cls, text) {
   const d = document.createElement("div");
   d.className = "msg " + cls; d.textContent = text;
   $("log").appendChild(d); $("log").scrollTop = 1e9;
+  return d;
 }
 function showFacts(facts) {
   const t = document.createElement("table");
@@ -63,6 +64,7 @@ async function send() {
   const tenant = $("tenant").value;
   $("box").value = "";
   add("me", text);
+  const pending = add("bot pending", "Thinking\u2026");
   try {
     const d = await getJSON("/chat", {
       method: "POST",
@@ -71,7 +73,7 @@ async function send() {
     });
     if ($("tenant").value !== tenant) return;  // user switched company while waiting
     if (d.error) {
-      add("bot", "Error: " + d.error);
+      add("bot err", d.error);
       await refreshPanels(tenant);             // the graph may have changed before the failure
       return;
     }
@@ -82,6 +84,7 @@ async function send() {
     $("tt").value = $("tt").max;
     await refreshGraph();
   } finally {
+    pending.remove();
     busy = false;
     $("sendBtn").disabled = false;
   }

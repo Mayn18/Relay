@@ -89,13 +89,13 @@ The UI's **Evidence panel** shows the exact Cypher (and parameters) behind every
   similar cases and the plan's policy, and is told to promise only what those support, and to say it
   is escalating when nothing covers the issue.
 - **Case lifecycle:** `open` -> `resolved` (when Billing resolves it) or `expired` (an open case is
-  closed automatically 15 minutes after it was opened, so an abandoned case cannot capture a later
-  conversation). While a case is open, messages go to Billing.
+  closed automatically after 15 minutes with no chat activity, so an abandoned case cannot capture a
+  later conversation; set `CASE_TTL_MINUTES` to change it). While a case is open, messages go to Billing.
 - **Guardrails:** the model may only store the facts `name` and `plan`; values are length-limited and
   `plan` must be one of Free, Basic, Pro or Enterprise. Rejected writes are logged as `guardrail`
   events and are visible in the Evidence panel. Tool names and arguments are validated, a second
   handoff is refused while a case is open, and messages are trimmed to 500 characters.
-- **Reliability:** each model call times out after 30 seconds and is retried up to 3 times. Users see
+- **Reliability:** each model call times out after 30 seconds (`LLM_TIMEOUT`) and is retried up to 3 times. Users see
   a generic message on failure, never the provider's raw error.
 
 ## Run it
@@ -129,8 +129,10 @@ Requires Python 3.12.
 |---|---|
 | `FALKOR_HOST`, `FALKOR_PORT`, `FALKOR_USERNAME`, `FALKOR_PASSWORD` | FalkorDB connection (ignored by Docker Compose, which points the app at its own database) |
 | `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | Any OpenAI-compatible chat API with tool calling |
+| `LLM_TIMEOUT` (optional, default `30`) | Seconds before one model call is abandoned and retried |
+| `CASE_TTL_MINUTES` (optional, default `15`) | Minutes of silence before an open case expires |
 
-Demo data (two customers per company, two past billing cases, the policy articles) is created
+Demo data (Maya at Acme Cloud and Raj at Northbank, two past Acme customers with resolved billing cases, the policy articles) is created
 automatically on start-up and is safe to re-run. The free FalkorDB Cloud tier has no persistence, so
 the data is recreated each time.
 
@@ -155,13 +157,38 @@ the data is recreated each time.
 - **Single process.** Each customer's turns are serialized by an in-process lock, so run one server
   process. This is Flask's development server.
 - **Case handling.** While a case is open, every message goes to Billing until it is resolved or
-  expires. Expiry counts from when the case was opened, not from the last message. Whether a case is
+  expires. Expiry counts from the last chat message (or from when the case opened, if there is none). Whether a case is
   resolved depends on the model calling `resolve_case`.
 - **Knowledge.** The policies are six short fictional articles for Acme Cloud only, and the customer's
   plan is whatever they tell the agent (it is not verified against a billing system).
 - **Guardrails** block unexpected facts and malformed tool calls. They do not stop all prompt injection.
 - **Model dependence.** Agent behaviour depends on the configured model's tool-calling quality. The
   UI needs internet access for the Cytoscape script and the model API.
+
+## Tests
+
+The regression tests run the real code against an embedded FalkorDB with a scripted fake model, so they
+need no API key, network or Docker:
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest tests
+```
+
+They cover case lifecycle and expiry, tool-call validation, guardrails, plan-aware policy retrieval,
+provider failures and retries, tenant isolation and the HTTP layer. They do **not** exercise a real model,
+a browser or Docker. Those are checked by hand with the demo script above.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+|---|---|
+| "The model provider had a hiccup" | The model API failed three times in a row (rate limit, 5xx, timeout). Send the message again, or switch to a more reliable tool-calling model. Free models fail often. |
+| `KeyError: 'LLM_API_KEY'` or `ValueError` on `FALKOR_PORT` at start | `.env` is missing or still has empty values. Copy `.env.example` and fill it in. |
+| Graph panel stays empty | The browser cannot load Cytoscape from the CDN (no internet), or the server is not running. |
+| Billing keeps answering after the issue is dealt with | The model did not call `resolve_case`. The case expires after the idle timeout, or click **Reset demo**. |
+| Billing says it has no information | The policy for that topic is not in the graph for the customer's current plan (Northbank has no articles by design). |
+| **Reset demo** says it failed behind a proxy or tunnel | `/reset` rejects requests whose `Origin` differs from the server's own address. Use http://localhost:5000 directly. |
 
 ## Project layout
 
@@ -170,7 +197,8 @@ app.py          Flask routes: /chat, /state, /graph, /reset
 agents.py       Concierge and Billing agents, tool dispatch, guardrails, model calls
 memory.py       All FalkorDB access: Cypher queries, seeding, case lifecycle, per-request trace
 web/            index.html, static/script.js, static/style.css
-Dockerfile, compose.yaml, .env.example, requirements.txt
+tests/          Regression tests (pytest, embedded FalkorDB, fake model)
+Dockerfile, compose.yaml, .env.example, requirements.txt, requirements-dev.txt
 ```
 
 ## AI use disclosure

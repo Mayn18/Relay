@@ -8,7 +8,7 @@ load_dotenv()
 client = OpenAI(
     api_key=os.environ["LLM_API_KEY"],
     base_url=os.environ["LLM_BASE_URL"],
-    timeout=30.0,  # a stalled provider must not hold a request (and the customer lock) for minutes
+    timeout=float(os.environ.get("LLM_TIMEOUT", "30")),  # seconds per model call; a stalled provider must not hold the customer lock for minutes
     max_retries=0,  # retries are handled, and bounded, by llm() below
 )
 MODEL = os.environ["LLM_MODEL"]
