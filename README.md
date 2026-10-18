@@ -9,9 +9,11 @@ the conversation, support cases, who handed which case to whom, and the company'
 Restart the server and nothing is lost, because the agents rebuild their context from the graph on
 every turn.
 
-> All demo data is fictional. Do not enter real personal information.
+## Demo
 
-<!-- Demo video: add the link here. -->
+https://github.com/Mayn18/Relay/raw/refs/heads/main/Media/Demo.mp4
+
+Watch the demo to see the agents hand off billing issues, retrieve plan-specific policies from graph memory, preserve customer facts over time, and isolate company data.
 
 ## Why a graph?
 
