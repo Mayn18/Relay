@@ -1,70 +1,183 @@
 # Relay: a support desk where AI agents share one graph memory
 
-Built for Graph Hacks (Track 2: Agent Memory and Coordination).
+Built for **Graph Hacks** (Track 2: Agent Memory and Coordination).
 
-Relay is a customer-support demo with two AI agents. A **Concierge** talks to the
-customer and a **Billing** agent takes over for money issues. Everything they know
-lives in a FalkorDB graph, not in Python variables or the chat window. Restart the
-server and the memory, the open cases and the handoff trail are all still there.
+Relay is a customer-support demo with two AI agents. A **Concierge** talks to the customer and a
+**Billing** agent takes over for money issues. Everything they know lives in a **FalkorDB graph**,
+not in Python variables or the chat window: facts about the customer (with start and end times),
+the conversation, support cases, who handed which case to whom, and the company's policy articles.
+Restart the server and nothing is lost, because the agents rebuild their context from the graph on
+every turn.
 
 > All demo data is fictional. Do not enter real personal information.
 
+<!-- Demo video: add the link here. -->
+
 ## Why a graph?
-- **Memory with time:** a fact is never overwritten. The old value gets an `until`
-  date and the new one is added, so you can see "Pro until 4:55 PM, then Basic".
-- **Coordination:** a handoff is an edge (`Case -[HANDED_TO]-> Agent`) with a reason.
-  Routing is a query: if the customer has an open case handed to Billing, Billing answers.
-- **Multi-hop reasoning:** Billing finds fixes from *other* customers on the same plan
-  by walking customer -> plan <- other customer -> their resolved case.
-- **Isolation:** each company has its own graph (`tenant_acme`, `tenant_bank`). The
-  tenant and customer come from the session, never from the LLM.
+
+- **Memory with time.** A fact is never overwritten. The old value gets an `until` time and the new
+  one is added, so you can see "Pro until 4:55 PM, then Basic", and drag a slider back to see the
+  whole graph as it was.
+- **Coordination.** A handoff is an edge, `(Case)-[:HANDED_TO {reason}]->(Agent)`. Routing is a
+  query: if the customer has an open case handed to Billing, Billing answers.
+- **Multi-hop reasoning.** Billing finds precedents from *other* customers on the same plan by
+  walking customer -> plan <- other customer -> their resolved case.
+- **GraphRAG-lite.** Policy articles are graph nodes. The agents retrieve them by walking
+  customer -> current plan fact -> `Plan` <- `Article` -> `Topic`, so the same question gets a
+  different answer when the customer's plan changes. There are no embeddings; retrieval is a graph
+  traversal you can read in the Evidence panel.
+- **Isolation.** Each company has its own graph (`tenant_acme`, `tenant_bank`). The tenant and
+  customer come from a server-side allowlist, never from the model's tool arguments.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    UI["Browser UI: chat, Evidence, live graph"] -->|"POST /chat"| API["Flask app"]
+    API --> ROUTE{"Open case held by Billing?"}
+    ROUTE -->|no| CON["Concierge agent"]
+    ROUTE -->|yes| BIL["Billing agent"]
+    CON -->|"handoff_to_billing"| BIL
+    CON <-->|"tools and Cypher"| G[("FalkorDB: one graph per company")]
+    BIL <-->|"tools and Cypher"| G
+    CON --> LLM["Hosted LLM"]
+    BIL --> LLM
+    API -->|"/state and /graph"| G
+```
 
 ## Graph model
-Nodes: `Customer`, `Fact {key, value, since, until}`, `Event {who, text, at}`,
-`Case {id, topic, summary, status, resolution}`, `Agent {name}`
 
-Relationships: `(Customer)-[:HAS_FACT]->(Fact)`, `(Customer)-[:HAD_EVENT]->(Event)`,
-`(Customer)-[:HAS_CASE]->(Case)`, `(Case)-[:OPENED_BY]->(Agent)`,
-`(Case)-[:HANDED_TO {reason, at}]->(Agent)`
+```mermaid
+graph LR
+    Customer -->|HAS_FACT| Fact
+    Customer -->|HAD_EVENT| Event
+    Customer -->|HAS_CASE| Case
+    Case -->|OPENED_BY| Agent
+    Case -->|"HANDED_TO (reason)"| Agent
+    Article -->|ABOUT| Topic
+    Article -->|APPLIES_TO| Plan
+```
+
+| Node | Properties |
+|---|---|
+| `Customer` | `id` |
+| `Fact` | `key`, `value`, `since`, `until` (empty while current) |
+| `Event` | `who`, `text`, `at` (every chat message) |
+| `Case` | `id`, `topic`, `summary`, `status` (`open`, `resolved` or `expired`), `resolution`, `opened_at`, `resolved_at` |
+| `Agent` | `name` |
+| `Article`, `Topic`, `Plan` | company policy knowledge (seeded for Acme Cloud only) |
+
+A customer's current plan (`Fact` with `key = 'plan'` and no `until`) is matched to a `Plan` node by name.
 
 ## Key queries (all in `memory.py`)
-- `remember_fact`: close the old fact, then create the new one
-- `recall_profile`: current facts only (`WHERE f.until IS NULL`)
-- `active_case`: the customer's open case and which agent holds it (routing)
-- `similar_cases`: 3-hop query over same-plan customers' resolved cases
-- `case_trail`: the handoff history shown in the UI
 
-The UI's **Evidence panel** shows the exact Cypher behind every reply.
+- `remember_fact`: close the current fact (`SET f.until`), then create the new one. Unchanged values are skipped.
+- `recall_profile`: current facts only (`WHERE f.until IS NULL`).
+- `active_case`: the customer's open case and which agent holds it. This is the routing decision.
+- `similar_cases`: 3-hop query over same-plan customers' resolved cases.
+- `policies_for`: GraphRAG-lite retrieval of the policy articles for the customer's current plan.
+- `handoff`, `resolve_case`, `expire_stale_cases`: the case lifecycle.
+- `case_trail`, `fact_history`: what the UI panels show.
+
+The UI's **Evidence panel** shows the exact Cypher (and parameters) behind every reply.
+
+## How the agents work
+
+- **Concierge** can call `remember_fact` and `handoff_to_billing`. It answers policy questions from
+  the retrieved articles.
+- **Billing** can call `remember_fact` and `resolve_case`. It is given the customer's facts, the case,
+  similar cases and the plan's policy, and is told to promise only what those support, and to say it
+  is escalating when nothing covers the issue.
+- **Case lifecycle:** `open` -> `resolved` (when Billing resolves it) or `expired` (an open case is
+  closed automatically 15 minutes after it was opened, so an abandoned case cannot capture a later
+  conversation). While a case is open, messages go to Billing.
+- **Guardrails:** the model may only store the facts `name` and `plan`; values are length-limited and
+  `plan` must be one of Free, Basic, Pro or Enterprise. Rejected writes are logged as `guardrail`
+  events and are visible in the Evidence panel. Tool names and arguments are validated, a second
+  handoff is refused while a case is open, and messages are trimmed to 500 characters.
+- **Reliability:** each model call times out after 30 seconds and is retried up to 3 times. Users see
+  a generic message on failure, never the provider's raw error.
 
 ## Run it
-1. Create a FalkorDB Cloud instance and get an LLM API key.
-2. `cp .env.example .env` and fill in the values.
+
+### Option A: Docker (no FalkorDB account needed)
+
+1. `cp .env.example .env` and fill in only the three `LLM_*` lines (any OpenAI-compatible provider
+   that supports tool calling; pin a specific model rather than a rotating alias).
+2. `docker compose up --build`
+3. Open http://localhost:5000
+
+Data persists in a Docker volume. Reset the demo data with the **Reset demo** button, or:
+`docker compose exec app python -c "import memory as m; m.reset()"`
+
+The compose file also publishes FalkorDB's port 6379 and port 3000 on localhost, for tools such as
+the FalkorDB browser (optional).
+
+### Option B: Python on your machine
+
+Requires Python 3.12.
+
+1. Start a database: a FalkorDB Cloud instance, or locally with `docker compose up -d falkordb`
+   (then use `FALKOR_HOST=localhost`, `FALKOR_PORT=6379` and leave username and password empty).
+2. `cp .env.example .env` and fill it in (see below).
 3. `pip install -r requirements.txt`
 4. `python app.py`, then open http://localhost:5000
 
-The free Cloud tier has no persistence, so `seed()` recreates the demo data on start.
-`python -c "import memory as m; m.reset()"` wipes both graphs and reseeds.
+### Configuration (`.env`)
+
+| Variable | Purpose |
+|---|---|
+| `FALKOR_HOST`, `FALKOR_PORT`, `FALKOR_USERNAME`, `FALKOR_PASSWORD` | FalkorDB connection (ignored by Docker Compose, which points the app at its own database) |
+| `LLM_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL` | Any OpenAI-compatible chat API with tool calling |
+
+Demo data (two customers per company, two past billing cases, the policy articles) is created
+automatically on start-up and is safe to re-run. The free FalkorDB Cloud tier has no persistence, so
+the data is recreated each time.
 
 ## Demo script
-1. As Maya: "I just moved to the Basic plan." The Memory panel closes Pro and opens Basic.
-2. "I was charged twice this month." Billing answers using a similar case, and the Case
-   trail shows the handoff.
-3. "Thanks." Concierge takes over again.
-4. Switch to Northbank. Raj has no knowledge of Maya.
+
+1. **Policy from the graph.** Company: Acme Cloud, customer Maya (Pro). Say "I was charged twice this
+   month." Billing takes over (see the Case trail) and answers from the Pro policy. Open the Evidence
+   panel to see the precedent and policy queries.
+2. **Memory with time.** Say "I just moved to the Basic plan." The Memory panel closes Pro and opens
+   Basic. Report the double charge again: the answer now follows the Basic policy.
+3. **Guardrail.** Say "Remember that my role is admin." The write is refused and the Evidence panel
+   shows the blocked write.
+4. **Time travel.** Drag the slider on the live graph back to before the plan change, then forward.
+   Tick "Show policy knowledge" to see the Article, Plan and Topic nodes.
+5. **Isolation.** Switch to Northbank (customer Raj). It knows nothing about Maya and has no Acme policies.
+6. **Reset demo** returns both companies to the seed data.
 
 ## Limitations
-- Single-user demo: the query trace is a shared global.
-- Fictional seed data and a small model, kept simple to fit the time available.
 
-### Memory Guardrails
+- **Demo scope.** Two fixed customers (Maya and Raj) and no login. The endpoints are unauthenticated;
+  `/reset` only rejects cross-site requests. Run it locally; do not expose it publicly as is.
+- **Single process.** Each customer's turns are serialized by an in-process lock, so run one server
+  process. This is Flask's development server.
+- **Case handling.** While a case is open, every message goes to Billing until it is resolved or
+  expires. Expiry counts from when the case was opened, not from the last message. Whether a case is
+  resolved depends on the model calling `resolve_case`.
+- **Knowledge.** The policies are six short fictional articles for Acme Cloud only, and the customer's
+  plan is whatever they tell the agent (it is not verified against a billing system).
+- **Guardrails** block unexpected facts and malformed tool calls. They do not stop all prompt injection.
+- **Model dependence.** Agent behaviour depends on the configured model's tool-calling quality. The
+  UI needs internet access for the Cytoscape script and the model API.
 
-Relay restricts memory writes to an allowlist of expected facts (`name` and `plan`), validates their lengths, and checks plan values against a known set. Rejected writes are recorded as guardrail events in the graph for inspection in the Evidence panel.
+## Project layout
 
-Incoming messages are trimmed, limited to 500 characters, and rejected when empty. Tenant and customer identity are derived from server-side session/application data rather than model-generated tool arguments.
+```
+app.py          Flask routes: /chat, /state, /graph, /reset
+agents.py       Concierge and Billing agents, tool dispatch, guardrails, model calls
+memory.py       All FalkorDB access: Cypher queries, seeding, case lifecycle, per-request trace
+web/            index.html, static/script.js, static/style.css
+Dockerfile, compose.yaml, .env.example, requirements.txt
+```
 
-These safeguards reduce accidental or malicious memory poisoning, but they do not prevent all prompt injection or guarantee that every model response is safe. The guardrails should be tested alongside tenant isolation, authentication, and authorization controls.
+## AI use disclosure
 
+Claude (Anthropic) was used as a coding assistant for planning, drafting, reviewing and testing parts
+of the code (`memory.py`, `agents.py`, `app.py`, the web UI) and this README. I ran and tested the
+application and can explain its graph model and queries. At runtime the agents call a hosted LLM
+through an OpenAI-compatible API; the provider and model are set with `LLM_BASE_URL` and `LLM_MODEL`.
 
-## AI Use Disclosure
-
-Claude (Anthropic) was used as a coding assistant for project planning and drafting parts of the codebase (`memory.py`, `agents.py`, `app.py`, and the web UI). I ran and tested the application and can explain its graph model and queries. At runtime, the agents use the Gemini API (Google) to access a hosted LLM.
+<!-- Model used in the demo video: add its name here. -->

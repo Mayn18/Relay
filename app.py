@@ -11,7 +11,7 @@ app = Flask(
     __name__, static_folder=os.path.join(WEB_DIR, "static"), static_url_path="/static"
 )
 TENANTS = {"tenant_acme": "maya", "tenant_bank": "raj"}  # tenant -> demo customer
-locks = {}  # tenant -> threading.Lock() to serialize access to the graph
+locks = {}  # (tenant, customer) -> threading.Lock(): one turn at a time per customer
 
 
 @app.get("/")
@@ -34,14 +34,16 @@ def state():
 
 @app.post("/chat")
 def chat():
-    d = request.get_json()
-    tenant = d.get("tenant", "")
+    d = request.get_json(silent=True)
+    if not isinstance(d, dict):
+        return jsonify(error="expected a JSON object"), 400
+    tenant = d.get("tenant")
 
-    if tenant not in TENANTS:  # tenant comes from our allowlist, never the LLM
+    if not isinstance(tenant, str) or tenant not in TENANTS:  # allowlist, never the LLM
         return jsonify(error="unknown tenant"), 400
 
     cust = TENANTS[tenant]
-    msg = str(d.get("message", "")).strip()[:500]
+    msg = str(d.get("message") or "").strip()[:500]
 
     if not msg:
         return jsonify(error="empty message"), 400
@@ -64,6 +66,10 @@ def chat():
 
 @app.post("/reset")
 def reset():
+    # Block cross-site requests (a web page open in your browser could otherwise POST here).
+    origin = request.headers.get("Origin")
+    if origin and origin.rstrip("/") != request.host_url.rstrip("/"):
+        return jsonify(error="forbidden"), 403
     m.reset()
     return jsonify(ok=True)
 

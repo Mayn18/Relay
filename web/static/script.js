@@ -24,38 +24,67 @@ function showTrace(trace) {
     $("trace").appendChild(d);
   });
 }
+let busy = false;  // true while a chat request is in flight
+
+async function getJSON(url, opts) {
+  // Always resolves to an object; failures become {error: "..."} instead of throwing.
+  try {
+    const r = await fetch(url, opts);
+    try { return await r.json(); }
+    catch (e) { return { error: "Server error (" + r.status + "). Please try again." }; }
+  } catch (e) {
+    return { error: "Could not reach the server. Please try again." };
+  }
+}
+
+async function refreshPanels(tenant) {
+  const d = await getJSON("/state?tenant=" + tenant);
+  if (d.error || tenant !== $("tenant").value) return;  // ignore replies for a company we left
+  showFacts(d.facts);
+  showCases(d.cases);
+  await refreshGraph();
+}
+
 async function switchTenant() {
   $("log").replaceChildren();
   $("trace").textContent = "Send a message to see them.";
-  const r = await fetch("/state?tenant=" + $("tenant").value);
-  const d = await r.json();
-  showFacts(d.facts);
-  showCases(d.cases);
   if (cy) cy.elements().remove();
   moments = [];
   $("tt").max = 0;
   $("tt").value = 0;
-  await refreshGraph();
+  await refreshPanels($("tenant").value);
 }
 
 async function send() {
   const text = $("box").value.trim();
-  if (!text) return;
+  if (!text || busy) return;           // ignore empty input and double-submits
+  busy = true;
+  $("sendBtn").disabled = true;
+  const tenant = $("tenant").value;
   $("box").value = "";
   add("me", text);
-  const r = await fetch("/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ tenant: $("tenant").value, message: text })
-  });
-  const d = await r.json();
-  if (d.error) { add("bot", "Error: " + d.error); return; }
-  add("bot", "[" + d.agent + "] " + d.reply);
-  showTrace(d.trace);
-  showFacts(d.facts);
-  showCases(d.cases);
-  $("tt").value = $("tt").max;
-  await refreshGraph();
+  try {
+    const d = await getJSON("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tenant: tenant, message: text })
+    });
+    if ($("tenant").value !== tenant) return;  // user switched company while waiting
+    if (d.error) {
+      add("bot", "Error: " + d.error);
+      await refreshPanels(tenant);             // the graph may have changed before the failure
+      return;
+    }
+    add("bot", "[" + d.agent + "] " + d.reply);
+    showTrace(d.trace);
+    showFacts(d.facts);
+    showCases(d.cases);
+    $("tt").value = $("tt").max;
+    await refreshGraph();
+  } finally {
+    busy = false;
+    $("sendBtn").disabled = false;
+  }
 }
 
 function showCases(cases) {
@@ -95,12 +124,11 @@ function atParam() {
 async function refreshGraph() {
   const at = atParam();
 
-  const r = await fetch("/graph?tenant=" + $("tenant").value +
+  const tenant = $("tenant").value;
+  const d = await getJSON("/graph?tenant=" + tenant +
     (at !== null ? "&at=" + at : "")
   );
-
-  const d = await r.json();
-  if (d.error) return;
+  if (d.error || tenant !== $("tenant").value) return;  // drop a reply for a company we left
 
   moments = Array.isArray(d.moments) ? d.moments : [];
 
@@ -167,6 +195,7 @@ async function refreshGraph() {
 }
 
 async function resetDemo() {
+  if (!confirm("Reset the demo data for both companies?")) return;
   try {
     const response = await fetch("/reset", { method: "POST" });
 

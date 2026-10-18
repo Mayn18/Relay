@@ -25,9 +25,9 @@
     <div class="col">
       <div class="card" style="flex:1;display:flex;flex-direction:column">
         <h3>Chat</h3>
-        <div id="log"></div>
-        <div><input type="text" id="box" placeholder="Type a message..." onkeydown="if(event.key==='Enter')send()">
-          <button onclick="send()">Send</button>
+        <div id="log" role="log" aria-live="polite"></div>
+        <div><input type="text" id="box" aria-label="Message" placeholder="Type a message..." onkeydown="if(event.key==='Enter')send()">
+          <button id="sendBtn" onclick="send()">Send</button>
         </div>
       </div>
     </div>

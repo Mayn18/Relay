@@ -5,7 +5,12 @@ import time
 import memory as m
 
 load_dotenv()
-client = OpenAI(api_key=os.environ["LLM_API_KEY"], base_url=os.environ["LLM_BASE_URL"])
+client = OpenAI(
+    api_key=os.environ["LLM_API_KEY"],
+    base_url=os.environ["LLM_BASE_URL"],
+    timeout=30.0,  # a stalled provider must not hold a request (and the customer lock) for minutes
+    max_retries=0,  # retries are handled, and bounded, by llm() below
+)
 MODEL = os.environ["LLM_MODEL"]
 
 print(f"Using model {MODEL} at {os.environ['LLM_BASE_URL']}")
@@ -27,7 +32,6 @@ S = {"type": "string"}
 # --- Guardrails: restrict which facts the model may store
 ALLOWED_FACTS = {"name": 40, "plan": 20}
 PLANS = {"free", "basic", "pro", "enterprise"}
-BILLING_WORDS = ("charged", "refund", "invoice", "billing", "payment", "billed")
 
 
 def check_fact(key, value):
@@ -99,46 +103,59 @@ def run_agent(system, tools, tenant, cust, history, user_msg):
         + history
         + [{"role": "user", "content": user_msg}]
     )
+    allowed = {t["function"]["name"] for t in tools}
+    handed = False
     for _ in range(4):
         msg = llm(msgs, tools)
         if not msg.tool_calls:
             return msg.content or "", False
         msgs.append(msg)
-        handed = False
         for tc in msg.tool_calls:
-            args = json.loads(tc.function.arguments)
             name = tc.function.name
             result = "ok"
-            if name == "remember_fact":
-                ok, err = check_fact(args.get("key"), args.get("value"))
-
-                if err:
-                    result = "refused: " + err
-                    m.log_event(tenant, cust, "guardrail", "Blocked write: " + err)
-                else:
-                    m.remember_fact(tenant, cust, *ok)
-
-            elif name == "handoff_to_billing":
-                m.handoff(
-                    tenant, cust, "billing", args["summary"], args["reason"], "Billing"
-                )
-                handed = True
-            elif name == "resolve_case":
-                case = m.active_case(
-                    tenant, cust
-                )  # case id from the graph, not the LLM
-                if case:
-                    m.resolve_case(tenant, cust, case["id"], args["resolution"])
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+                if not isinstance(args, dict):
+                    raise ValueError("arguments must be a JSON object")
+            except ValueError:
+                args, result = {}, "error: arguments must be a JSON object"
+            if name not in allowed:  # only tools this agent was actually given
+                result = f"error: unknown tool '{name}'"
+            elif result == "ok":
+                if name == "remember_fact":
+                    ok, err = check_fact(args.get("key"), args.get("value"))
+                    if err:
+                        result = "refused: " + err
+                        m.log_event(tenant, cust, "guardrail", "Blocked write: " + err)
+                    else:
+                        m.remember_fact(tenant, cust, *ok)
+                elif name == "handoff_to_billing":
+                    summary = str(args.get("summary") or "").strip()[:300]
+                    reason = str(args.get("reason") or "").strip()[:300]
+                    if not summary or not reason:
+                        result = "error: summary and reason are required"
+                    elif handed or m.active_case(tenant, cust):
+                        result = "A case is already open; do not hand off again."
+                    else:
+                        m.handoff(tenant, cust, "billing", summary, reason, "Billing")
+                        handed = True
+                elif name == "resolve_case":
+                    case = m.active_case(tenant, cust)  # case id from the graph, not the LLM
+                    if case:
+                        resolution = str(args.get("resolution") or "Resolved").strip()[:300]
+                        m.resolve_case(tenant, cust, case["id"], resolution)
+                    else:
+                        result = "error: there is no open case"
             msgs.append({"role": "tool", "tool_call_id": tc.id, "content": result})
         if handed:
             return "", True
     return "", False
 
 
-def billing_turn(tenant, cust, case, history, user_msg, fresh=False):
+def billing_turn(tenant, cust, case, history, user_msg):
     profile = m.recall_profile(tenant, cust)
     similar = m.similar_cases(tenant, cust, case["topic"])
-    policies = m.policies_for(tenant, cust, case["topic"])
+    policies = m.policies_for(tenant, cust)  # all policy topics for the current plan
     system = (
         "You are the Billing agent of a support desk. Be brief and friendly.\n"
         f"Customer facts (from the graph): {json.dumps(profile)}\n"
@@ -153,16 +170,6 @@ def billing_turn(tenant, cust, case, history, user_msg, fresh=False):
         "If it is about something else, answer briefly and mention the case is still open.\n"
     )
     reply, _ = run_agent(system, [REMEMBER, RESOLVE], tenant, cust, history, user_msg)
-    still_open = m.active_case(tenant, cust)
-    if (
-        fresh and still_open and (similar or policies)
-    ):  # safety net: close with a fix the graph already proves
-        m.resolve_case(
-            tenant,
-            cust,
-            still_open["id"],
-            similar[0]["fix"] if similar else policies[0]["text"],
-        )
     return reply
 
 
@@ -192,7 +199,6 @@ def chat(tenant, cust, user_msg):
         system = (
             "You are the Concierge agent of a support desk. Be brief and friendly.\n"
             f"Known facts about this customer (from the graph): {json.dumps(profile)}\n"
-            f"Recent conversation (from the graph): {json.dumps(events)}\n"
             f"Company policy for this customer's plan (from the graph): {json.dumps(m.policies_for(tenant, cust))}\n"
             "Answer policy questions only from these policies; if not covered, say you will check with the team.\n"
             "Use these facts instead of asking again. If the customer states or changes a "
@@ -203,29 +209,10 @@ def chat(tenant, cust, user_msg):
         reply, handed = run_agent(
             system, [REMEMBER, HANDOFF], tenant, cust, history, user_msg
         )
-        if (
-            not handed
-            and not m.active_case(tenant, cust)
-            and any(w in user_msg.lower() for w in BILLING_WORDS)
-        ):
-            m.handoff(
-                tenant,
-                cust,
-                "billing",
-                user_msg[:120],
-                "Billing keywords in the message (fallback routing)",
-                "Billing",
-            )
-            handed = True
         if handed:
             agent = "Billing"
             reply = billing_turn(
-                tenant,
-                cust,
-                m.active_case(tenant, cust),
-                history,
-                user_msg,
-                fresh=True,
+                tenant, cust, m.active_case(tenant, cust), history, user_msg
             )
     m.log_event(tenant, cust, agent.lower(), reply)
     return reply, agent

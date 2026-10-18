@@ -1,5 +1,5 @@
 import contextvars
-import os, time
+import os, time, uuid
 from dotenv import load_dotenv
 from falkordb import FalkorDB
 
@@ -36,6 +36,8 @@ def run(tenant, cypher, params=None, write=False):
 
 
 def remember_fact(tenant, cust, key, value):
+    if recall_profile(tenant, cust).get(key) == value:
+        return  # unchanged: do not add a duplicate fact version (e.g. when a user retries)
     now = int(time.time())
     run(
         tenant,
@@ -179,7 +181,7 @@ def reset():
 
 def handoff(tenant, cust, topic, summary, reason, to_agent):
     now = int(time.time())
-    cid = f"case_{cust}_{now}"
+    cid = f"case_{cust}_{uuid.uuid4().hex[:8]}"  # unique even within the same second
     run(
         tenant,
         """MERGE (c:Customer {id:$cust})
@@ -228,7 +230,7 @@ def active_case(tenant, cust):
 def resolve_case(tenant, cust, case_id, resolution):
     run(
         tenant,
-        """MATCH (:Customer {id:$cust})-[:HAS_CASE]->(k:Case {id:$cid})
+        """MATCH (:Customer {id:$cust})-[:HAS_CASE]->(k:Case {id:$cid, status:'open'})
                    SET k.status = 'resolved', k.resolution = $res, k.resolved_at = $now""",
         {"cust": cust, "cid": case_id, "res": resolution, "now": int(time.time())},
         write=True,
