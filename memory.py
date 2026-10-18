@@ -202,29 +202,35 @@ def handoff(tenant, cust, topic, summary, reason, to_agent):
     )
     return cid
 
-CASE_TTL = 15 * 60  # seconds an open case may sit before it expires
+CASE_TTL = int(os.environ.get("CASE_TTL_MINUTES", "15")) * 60  # idle seconds before an open case expires
 
 
 def expire_stale_cases(tenant, cust):
-    """Close cases left open by an abandoned or failed conversation, so they cannot hijack new ones."""
+    """Close cases left open by an abandoned or failed conversation, so they cannot hijack new ones.
+    A case expires after CASE_TTL seconds with no chat activity (latest message, or the time it opened)."""
     now = int(time.time())
-    run(tenant, """MATCH (:Customer {id:$cust})-[:HAS_CASE]->(k:Case {status:'open'})
-                   WHERE k.opened_at < $cutoff
+    run(tenant, """MATCH (c:Customer {id:$cust})-[:HAS_CASE]->(k:Case {status:'open'})
+                   OPTIONAL MATCH (c)-[:HAD_EVENT]->(e:Event)
+                   WITH k, max(e.at) AS last_ms
+                   WITH k, CASE WHEN last_ms IS NULL OR last_ms / 1000 < k.opened_at
+                                THEN k.opened_at ELSE last_ms / 1000 END AS last_active
+                   WHERE last_active < $cutoff
                    SET k.status = 'expired', k.resolved_at = $now,
                        k.resolution = 'Expired: no activity'""",
         {"cust": cust, "cutoff": now - CASE_TTL, "now": now}, write=True)
+
 
 def active_case(tenant, cust):
     r = run(
         tenant,
         """MATCH (:Customer {id:$cust})-[:HAS_CASE]->(k:Case {status:'open'})-[h:HANDED_TO]->(a:Agent)
-                       RETURN k.id, k.topic, k.summary, a.name ORDER BY h.at DESC LIMIT 1""",
+                       RETURN k.id, k.topic, k.summary, a.name, k.opened_at ORDER BY h.at DESC LIMIT 1""",
         {"cust": cust},
     )
     if not r.result_set:
         return None
-    i, t, s, a = r.result_set[0]
-    return {"id": i, "topic": t, "summary": s, "agent": a}
+    i, t, s, a, o = r.result_set[0]
+    return {"id": i, "topic": t, "summary": s, "agent": a, "opened_at": o}
 
 
 def resolve_case(tenant, cust, case_id, resolution):
@@ -235,6 +241,28 @@ def resolve_case(tenant, cust, case_id, resolution):
         {"cust": cust, "cid": case_id, "res": resolution, "now": int(time.time())},
         write=True,
     )
+
+
+def escalate_case(tenant, cust, case_id, reason):
+    """Hand an open case to a human: it stops routing messages to Billing and is never used as a precedent."""
+    run(
+        tenant,
+        """MATCH (:Customer {id:$cust})-[:HAS_CASE]->(k:Case {id:$cid, status:'open'})
+                   SET k.status = 'escalated', k.resolution = $res, k.resolved_at = $now""",
+        {"cust": cust, "cid": case_id, "res": reason, "now": int(time.time())},
+        write=True,
+    )
+
+
+def billing_turns(tenant, cust, case):
+    """How many Billing replies this case has already had (counted from the graph, not Python state)."""
+    r = run(
+        tenant,
+        """MATCH (:Customer {id:$cust})-[:HAD_EVENT]->(e:Event {who:'billing'})
+                       WHERE e.at >= $since RETURN count(e)""",
+        {"cust": cust, "since": int(case["opened_at"]) * 1000},
+    )
+    return r.result_set[0][0] if r.result_set else 0
 
 
 def similar_cases(tenant, cust, topic):

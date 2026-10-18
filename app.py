@@ -123,6 +123,7 @@ def graph():
                 "label": label,
                 "closed": closed,
                 "resolved": resolved,
+                "status": p.get("status") if kind == "Case" else None,
             }
         )
     erows = g.ro_query("""MATCH (a)-[r]->(b) WHERE NOT 'Event' IN labels(b)

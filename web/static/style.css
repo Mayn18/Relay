@@ -192,3 +192,20 @@ h3 {
 .legend-policy {
     background: #fdba74;
 }
+
+/* Chat states */
+.msg.pending { color: #6b7280; font-style: italic; animation: pulse 1.2s ease-in-out infinite; }
+.msg.err { background: #fee2e2; color: #7f1d1d; }
+@keyframes pulse { 50% { opacity: 0.45; } }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+#box { width: calc(100% - 80px); box-sizing: border-box; }
+
+/* Narrow screens: stack the three columns instead of squeezing them */
+@media (max-width: 900px) {
+    .wrap { display: flex; flex-direction: column; height: auto; }
+    .col { overflow: visible; }
+    #log { max-height: 55vh; min-height: 160px; }
+    .graph-canvas { height: 320px; }
+    #trace { max-height: 260px; overflow: auto; }
+}
+.legend-case-escalated { background: #fed7aa; }
